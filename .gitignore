@@ -1,0 +1,19 @@
+# ESP-IDF build output
+build/
+
+# Managed components (pulled from dependencies.lock via idf_component.yml)
+managed_components/
+
+# Vendored third-party deps (have their own .git; re-fetch on fresh clone)
+components/esp-libopus/
+components/esp-protocols/
+components/srtp/
+deps/libpeer/
+
+# Generated sdkconfig (sdkconfig.defaults is the tracked source of truth)
+sdkconfig
+sdkconfig.old
+
+# Editor / OS cruft
+*.swp
+.DS_Store
