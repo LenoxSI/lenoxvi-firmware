@@ -18,6 +18,9 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # Defaults to partitions.csv
 CONFIG_PARTITION_TABLE_CUSTOM=y
 
+# XIAO ESP32-S3 ships 8MB flash; the partition table needs 7.8MB
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
 # Set highest CPU Freq
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 

@@ -46,12 +46,12 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.1
+    version: 5.3.1
 direct_dependencies:
 - espressif/esp_codec_dev
 - espressif/esp_io_expander_tca95xx_16bit
 - espressif/led_strip
 - idf
-manifest_hash: 5dcbcc0e83275b88c4f374cc9160ba5b04923dd6242177a427109e3f6dc06b98
+manifest_hash: 71258bc585533869ced76ae0ecff2e4fc88461f97a39e87bd0ec3728a4233c59
 target: esp32s3
 version: 2.0.0

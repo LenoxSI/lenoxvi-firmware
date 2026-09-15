@@ -78,11 +78,8 @@ void pipecat_http_request(char *offer, char *answer) {
   config.event_handler = http_event_handler;
   config.timeout_ms = HTTP_TIMEOUT_MS;
   config.user_data = answer;
-  /* lenoxvi's runner serves self-signed HTTPS: use the ESP cert bundle and
-   * skip the common-name check (the cert CN is appliance-host, the URL is the
-   * raw LAN IP — mismatch is expected). Pinned-cert hardening later. */
-  config.crt_bundle_attach = esp_crt_bundle_attach;
-  config.skip_cert_common_name_check = true;
+  /* Self-signed HTTPS is handled by sdkconfig (ESP_TLS_SKIP_SERVER_CERT_VERIFY,
+   * same as v1) — no cert bundle needed here. */
 
   ESP_LOGI(LOG_TAG, "Connecting to %s", config.url);
 
