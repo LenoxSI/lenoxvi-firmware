@@ -13,6 +13,12 @@ if(NOT DEFINED ENV{PIPECAT_SMALLWEBRTC_URL})
   message(FATAL_ERROR "Env variable PIPECAT_SMALLWEBRTC_URL must be set")
 endif()
 
+if(DEFINED ENV{PIPECAT_ROOM})
+  add_compile_definitions(PIPECAT_ROOM="$ENV{PIPECAT_ROOM}")
+else()
+  add_compile_definitions(PIPECAT_ROOM="bedroom")
+endif()
+
 if(DEFINED ENV{LOG_DATACHANNEL_MESSAGES})
   add_compile_definitions(LOG_DATACHANNEL_MESSAGES="1")
 endif()

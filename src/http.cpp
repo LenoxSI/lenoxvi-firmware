@@ -78,6 +78,11 @@ void pipecat_http_request(char *offer, char *answer) {
   config.event_handler = http_event_handler;
   config.timeout_ms = HTTP_TIMEOUT_MS;
   config.user_data = answer;
+  /* lenoxvi's runner serves self-signed HTTPS: use the ESP cert bundle and
+   * skip the common-name check (the cert CN is appliance-host, the URL is the
+   * raw LAN IP — mismatch is expected). Pinned-cert hardening later. */
+  config.crt_bundle_attach = esp_crt_bundle_attach;
+  config.skip_cert_common_name_check = true;
 
   ESP_LOGI(LOG_TAG, "Connecting to %s", config.url);
 
@@ -95,6 +100,12 @@ void pipecat_http_request(char *offer, char *answer) {
     cJSON_Delete(j_offer);
     ESP_LOGE(LOG_TAG, "Unable to create JSON offer");
     return;
+  }
+  /* Room name = the zone routing key (lenoxvi v2 contract). The appliance
+   * uses it for zone-aware behavior (e.g. routing replies to that room's
+   * Sonos); the request handler passes extra fields through untouched. */
+  if (cJSON_AddStringToObject(j_offer, "room", PIPECAT_ROOM) == NULL) {
+    ESP_LOGE(LOG_TAG, "Unable to add room to offer");
   }
 
   ESP_LOGD(LOG_TAG, "OFFER\n%s", offer);
