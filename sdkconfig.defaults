@@ -12,6 +12,11 @@ CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 # Enable DTLS-SRTP
 CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
 
+# TLS 1.3 for the HTTPS OTA client: uvicorn negotiates TLSv1.3 and the
+# node only spoke 1.2 — the OTA version check died -0x4290 (handshake
+# failure) on every boot (2026-09-19). WebRTC/DTLS paths unaffected.
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
+
 # libpeer requires large stack allocations
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 

@@ -102,6 +102,17 @@ static void rtvi_handle_message(const rtvi_msg_t *msg) {
       rtvi_callbacks->on_bot_tts_text(j_text->valuestring);
       break;
     }
+    case hash("check-ota"): {
+      /* Server-pushed OTA check (2026-09-19): a live flash while audio/WiFi
+       * run from flash-cache crashes the chip (double exception — observed
+       * 11 identical crashes). So the in-session trigger just REBOOTS; the
+       * serialized boot-time check then downloads+flashes safely before
+       * WebRTC/audio exist. Update latency = one reboot (~15s), which the
+       * node does anyway on disconnects. */
+      ESP_LOGI(LOG_TAG, "check-ota received — rebooting into boot-time check");
+      esp_restart();
+      break;
+    }
     default:
       break;
   }

@@ -8,10 +8,30 @@
 #include <esp_http_client.h>
 #include <esp_app_format.h>
 #include <esp_ota_ops.h>
+#include <esp_netif.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 static const char *OTA_TAG = "ota";
+
+/* Wait for the station to have an IP before any HTTP (2026-09-19): the boot
+ * check fired ~1s after esp_wifi_start and lost the race — got-ip lands ~1s
+ * later, so the version GET died ESP_ERR_HTTP_CONNECT every boot. The
+ * WebRTC offer path never saw this because it starts from the got-ip event. */
+static void wait_for_network(void) {
+    for (int i = 0; i < 150; i++) {  /* up to 15s */
+        esp_netif_t *n = NULL;
+        while ((n = esp_netif_next(n)) != NULL) {
+            esp_netif_ip_info_t ip;
+            if (esp_netif_get_ip_info(n, &ip) == ESP_OK &&
+                ip.ip.addr != 0) {
+                return;  /* some interface has an IP */
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    ESP_LOGW(OTA_TAG, "no IP after 15s — proceeding anyway");
+}
 
 #define OTA_CHECK_TIMEOUT_MS 5000
 #define OTA_VERSION_BUF_SIZE 512
@@ -66,6 +86,7 @@ static void build_firmware_url(char *out, size_t out_len, const char *suffix) {
     const char *base = PIPECAT_SMALLWEBRTC_URL;
     const char *api_off = strstr(base, "/api/offer");
     size_t prefix_len = api_off ? (size_t)(api_off - base) : strlen(base);
+    if (prefix_len >= out_len) prefix_len = out_len - 1;
     snprintf(out, out_len, "%.*s/firmware/%s", (int)prefix_len, base, suffix);
 }
 
@@ -100,7 +121,11 @@ static esp_err_t download_and_flash_ota(const char *firmware_url) {
     esp_http_client_config_t config = {};
     config.url = firmware_url;
     config.timeout_ms = 30000;
-    config.keep_alive_enable = true;
+    /* keep_alive OFF for the 1.2MB pull (2026-09-19): with it on, the first
+     * attempt died ~4s in with ESP_ERR_HTTP_CONNECT — the version-check
+     * connection had gone stale and the long download needs its own socket.
+     * Fresh connection, no reuse. */
+    config.keep_alive_enable = false;
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
@@ -203,6 +228,7 @@ static esp_err_t download_and_flash_ota(const char *firmware_url) {
 }
 
 void pipecat_check_ota_update(void) {
+    wait_for_network();
     char version_url[256];
     build_firmware_url(version_url, sizeof(version_url), "version");
 

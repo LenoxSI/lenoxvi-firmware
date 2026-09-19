@@ -19,6 +19,24 @@ static void pipecat_webrtc_init_task(void *user_data) {
   vTaskDelete(NULL);
 }
 
+static void pipecat_webrtc_init_task(void *pvParameter);
+
+void pipecat_start_webrtc() {
+  // Serialized after the boot OTA check (got-ip handler, 2026-09-19):
+  // WebRTC init must not race OTA (heap) and OTA flashing must not race
+  // flash-cached code execution (double exception). boot_ota calls this
+  // when it's done (or immediately if its stack alloc failed).
+  static bool webrtc_started = false;
+  if (webrtc_started) return;
+  webrtc_started = true;
+  static StackType_t webrtc_stack[8192];
+  static StaticTask_t webrtc_task_buf;
+  xTaskCreateStaticPinnedToCore(pipecat_webrtc_init_task, "webrtc_init",
+                                8192, NULL, 5, webrtc_stack,
+                                &webrtc_task_buf, 0);
+  ESP_LOGI(LOG_TAG, "WebRTC init task spawned");
+}
+
 static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data) {
   static int s_retry_num = 0;  // reset to 0 on IP_EVENT_STA_GOT_IP
@@ -38,16 +56,43 @@ static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
     g_wifi_connected = true;
     s_retry_num = 0;  // reset retry counter on successful connection
     rgb_set_state(RGB_STATE_WIFI_UP);
-    // WebRTC bring-up runs on its OWN task: it was overflowing the sys_evt
-    // task's stack (DTLS cert gen + ICE + SDP from inside an event handler).
-    if (!g_webrtc_started) {
-      g_webrtc_started = true;
-      static StackType_t webrtc_stack[8192];
-      static StaticTask_t webrtc_task_buf;
-      xTaskCreateStaticPinnedToCore(pipecat_webrtc_init_task, "webrtc_init",
-                                    8192, NULL, 5, webrtc_stack,
-                                    &webrtc_task_buf, 0);
-      ESP_LOGI(LOG_TAG, "WebRTC init task spawned");
+    // BOOT-TIME OTA, SERIALIZED (2026-09-19): v1's proven order — check
+    // (and if needed download+flash) BEFORE WebRTC/audio exist. Running
+    // the flash while audio/WiFi execute from flash-cache = double
+    // exception crash loop (11 identical crashes, backtrace CORRUPTED).
+    // The boot_ota task owns got-ip alone; when it finishes (no update,
+    // check failed, or reboot-into-new-image), IT starts WebRTC.
+    static bool ota_started = false;
+    if (!ota_started) {
+      ota_started = true;
+      // NOTE: pipecat_ota_mark_valid() is NOT called here. It writes
+      // otadata (flash) and doing that while WiFi is mid-connection =
+      // flash-cache-disabled while WiFi IRQs run from flash = double
+      // exception crash loop, self-sustaining because the crash also kills
+      // the mark-valid. v1 called it BEFORE esp_wifi_start() — that's the
+      // proven order (see main.cpp). Only the network check lives here.
+      extern void pipecat_check_ota_update(void);
+      extern void pipecat_start_webrtc(void);
+      static StaticTask_t ota_task_buf;
+      static StackType_t *ota_stack = NULL;
+      if (ota_stack == NULL) {
+        ota_stack = (StackType_t *)heap_caps_malloc(8192 * sizeof(StackType_t),
+                                                    MALLOC_CAP_SPIRAM);
+      }
+      if (ota_stack != NULL) {
+        xTaskCreateStaticPinnedToCore(
+            [](void *arg) {
+              // Reboots itself if it flashes; returns otherwise.
+              pipecat_check_ota_update();
+              pipecat_start_webrtc();
+              vTaskDelete(NULL);
+            },
+            "boot_ota", 8192, NULL, 5, ota_stack, &ota_task_buf, 0);
+        ESP_LOGI(LOG_TAG, "boot_ota task spawned (PSRAM stack)");
+      } else {
+        ESP_LOGE(LOG_TAG, "boot_ota PSRAM alloc failed — starting WebRTC");
+        pipecat_start_webrtc();
+      }
     }
   }
 }

@@ -25,6 +25,12 @@ extern "C" void app_main(void) {
   pipecat_init_i2c_early();
   pipecat_init_screen();
   peer_init();
+  // OTA validity mark BEFORE WiFi (v1's proven order, restored 2026-09-19):
+  // it writes otadata (flash). After got-ip it raced WiFi's connection and
+  // double-exception crash-looped the node (WiFi "kept going out"). Here
+  // the radio is idle and nothing executes from flash during the write.
+  extern void pipecat_ota_mark_valid(void);
+  pipecat_ota_mark_valid();
   // NOTE: audio init (I2S DMA buffers) is deferred until AFTER the WebRTC
   // peer connects — see wifi.cpp / webrtc.cpp. I2S's internal-RAM DMA
   // allocations fragment the heap; mbedtls_ssl_cookie_setup needs one large
@@ -33,12 +39,9 @@ extern "C" void app_main(void) {
   // DTLS allocates first). The audio task starts on CONNECTED anyway.
   pipecat_init_wifi();
 
-  // OTA: check for firmware update after WiFi connects, before WebRTC.
-  // If an update is found and flashed, the device reboots into the new image.
-  // Mark the current app valid first (rollback support) so a good image
-  // survives even if WebRTC fails after this point.
-  pipecat_ota_mark_valid();
-  pipecat_check_ota_update();
+  // OTA check now runs from the got-ip event handler (wifi.cpp) — running
+  // it here raced the network AND failed TLS allocation before the heap
+  // settled (mbedtls -0x7F00, 2026-09-19).
 
   // WebRTC init is deferred to the first IP_EVENT_STA_GOT_IP (see wifi.cpp) —
   // starting it before the network stack allocates exhausts the heap and
