@@ -14,8 +14,18 @@ CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
 
 # TLS 1.3 for the HTTPS OTA client: uvicorn negotiates TLSv1.3 and the
 # node only spoke 1.2 — the OTA version check died -0x4290 (handshake
-# failure) on every boot (2026-09-19). WebRTC/DTLS paths unaffected.
+# failure) on every boot (2026-09-19). WebRTC/DTLS paths unaffected
+# (DTLS pinned to 1.2 in libpeer — see patches/libpeer-dtls-1.2-pin.md).
 CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
+
+# mbedtls allocations from PSRAM (2026-09-19): with WiFi + WebRTC +
+# audio DMA live, the largest contiguous INTERNAL free block is ~20KB —
+# mbedtls_ssl_setup (16KB in-buffer + out + handshake) fails -0x7F00
+# (ALLOC_FAILED) at every OTA check. PSRAM has 8MB free; mbedtls buffers
+# in PSRAM cost latency, not correctness, and the OTA path is not
+# latency-sensitive. DTLS/SRTP media buffers stay internal (libpeer
+# manages its own).
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
 # libpeer requires large stack allocations
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

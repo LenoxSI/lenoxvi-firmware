@@ -228,6 +228,12 @@ static esp_err_t download_and_flash_ota(const char *firmware_url) {
 }
 
 void pipecat_check_ota_update(void) {
+    /* EMPIRICAL BISECT (2026-09-19): this exact check+download+flash ran
+     * fine at CONNECTED in build 47 (version GET 200, 1.0.1->1.0.2,
+     * download started). It crashes at got-ip time (StoreProhibited in
+     * ROM memcpy during TLS setup, deterministic). So: CONNECTED only.
+     * If a live esp_ota_write still crashes, the staging architecture
+     * (download now, flash pre-WiFi next boot) is the fallback. */
     wait_for_network();
     char version_url[256];
     build_firmware_url(version_url, sizeof(version_url), "version");

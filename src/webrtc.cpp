@@ -102,6 +102,31 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
                                   30000, NULL, 7, stack_memory, &task_buffer,
                                   0);
     pipecat_init_rtvi(peer_connection, &pipecat_rtvi_callbacks);
+    // OTA check at CONNECTED (empirical bisect 2026-09-19): the identical
+    // version GET crashed deterministically at got-ip (StoreProhibited,
+    // ROM memcpy, TLS setup) but worked perfectly here in build 47 — heap
+    // is settled, TLS session established by the offer POST moments
+    // earlier. Internal-RAM static stack (largest free block ~20K here —
+    // plain xTaskCreate silently fails).
+    static bool ota_done = false;
+    if (!ota_done) {
+      ota_done = true;
+      extern void pipecat_check_ota_update(void);
+      static StaticTask_t ota_task_buf;
+      static StackType_t ota_stack[6144 / sizeof(StackType_t)];
+      xTaskCreateStaticPinnedToCore(
+          [](void *arg) {
+            /* Give the TLS stack a moment post-offer: spawning at the
+             * CONNECTED instant races the offer POST's session setup and
+             * the version GET dies ESP_ERR_HTTP_CONNECT (2026-09-19).
+             * 5s costs nothing — deploys are not latency-sensitive. */
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            pipecat_check_ota_update();  // reboots itself if it flashes
+            vTaskDelete(NULL);
+          },
+          "ota_check", 6144 / sizeof(StackType_t), NULL, 3, ota_stack, &ota_task_buf, 0);
+      ESP_LOGI(LOG_TAG, "OTA check task spawned (CONNECTED)");
+    }
 #endif
   }
 }
