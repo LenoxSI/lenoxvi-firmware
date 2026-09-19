@@ -38,6 +38,7 @@
 /* XIAO D9/D8/D7/D6; 43/44 are UART0 pins repurposed for I2S */
 #define I2S_BCLK_PIN  GPIO_NUM_8
 #define I2S_LRCK_PIN  GPIO_NUM_7
+#define I2S_MCLK_PIN  GPIO_NUM_9   /* XVF3800 MCLK trace (Seeed wiki pinout) */
 #define I2S_DOUT_PIN  GPIO_NUM_44
 #define I2S_DIN_PIN   GPIO_NUM_43
 
@@ -50,11 +51,16 @@
 #define PCM_MONO_BYTES           (PCM_MONO_SAMPLES * 2)
 #define HW_STEREO32_BYTES        (PCM_MONO_SAMPLES * 2 * 4)
 #define I2S_READ_TIMEOUT_MS      100
+#define XVF_NATIVE_RATE          48000   /* bus rate the XMOS wants (16k bus wedges it: LEDs lock, zero audio) */
+#define HW48_MONO_SAMPLES        960     /* 20ms @ 48k */
+#define HW48_STEREO32_BYTES      (HW48_MONO_SAMPLES * 2 * 4)   /* 7680 B / 20ms */
 
 /* ── Handles ────────────────────────────────────────────────────────────── */
 static i2c_master_bus_handle_t i2c_bus  = NULL;
 static i2s_chan_handle_t        tx_chan  = NULL;
 static i2s_chan_handle_t        rx_chan  = NULL;
+static i2s_std_config_t         g_std_cfg;    /* saved for full I2S re-init (heal) */
+static i2s_chan_config_t        g_chan_cfg;
 static std::atomic<bool>        is_playing = false;
 
 static void update_is_playing(int16_t *buf, size_t n) {
@@ -64,9 +70,188 @@ static void update_is_playing(int16_t *buf, size_t n) {
     is_playing = false;
 }
 
+/* ── XVF3800 control plane (ported from Kyzcreig's proven implementation) ──
+ * All XVF3800 DSP state is VOLATILE: lost on every XMOS power-cycle/DFU.
+ * The stock firmware boots with default routing (conferencing post-proc,
+ * echo suppression on) which spectrally guts speech for ASR and — with
+ * our idle TX line as far-end reference — suppresses the mic entirely
+ * after the AEC converges (observed: mic dead ~1-3 min after boot, LEDs
+ * still alive). The profile below is re-applied at EVERY boot, like the
+ * ESPHome component and Kyzcreig's configure_xvf3800_dsp_profile(). */
+static i2c_master_dev_handle_t xvf3800 = NULL;
+
+#define XVF_READ_BIT          0x80
+#define XVF_CTRL_DONE         0x00
+#define XVF_CTRL_WAIT         0x01
+#define XVF_SERVICER_RETRY    0xFE
+#define XVF_CONTROL_TIMEOUT_MS 100  /* Kyzcreig's value; 50 was too tight */
+#define XVF_CONTROL_RETRIES   50
+
+/* Servicer resource IDs (Kyzcreig/xvf3800 map) */
+#define XVF_RESID_PP          17
+#define XVF_RESID_AEC         33
+#define XVF_RESID_AUDIO_MGR   35
+/* AUDIO_MGR commands — v1.0.8 map (Seeed wiki, respeaker_xvf_3800_i2c_list).
+ * NOT Kyzcreig's v6.34.4 numbers: cmd 20/21 there are REF_GAIN/MIC_GAIN but
+ * on v1.0.8 they're OP_R_PK0/OP_R_PK1 (routing registers!). */
+#define XVF_CMD_AUDIO_MGR_MIC_GAIN      0
+#define XVF_CMD_AUDIO_MGR_REF_GAIN      1
+/* AEC commands */
+#define XVF_CMD_AEC_ASROUTONOFF       30
+#define XVF_CMD_AEC_HPFONOFF          33
+#define XVF_CMD_AEC_FIXEDBEAMSONOFF   34
+/* PP commands */
+#define XVF_CMD_PP_ECHOONOFF          23
+#define XVF_CMD_PP_NLATTENONOFF       27
+#define XVF_CMD_PP_AGCONOFF           10
+#define XVF_CMD_PP_AGCGAIN            13
+#define XVF_CMD_PP_LIMITONOFF         19
+#define XVF_CMD_PP_AGCMAXGAIN         11
+#define XVF_CMD_PP_AGCDESIREDLEVEL    12
+/* Audio categories: 7 = ASR (clean post-beamformer, no suppression) */
+#define XVF_AUDIO_CATEGORY_ASR        7
+#define XVF_AUDIO_SOURCE_AUTO_SELECT  1
+
+static esp_err_t xvf_write_bytes(uint8_t resid, uint8_t cmd,
+                                 const uint8_t *value, size_t value_len) {
+    if (xvf3800 == NULL) return ESP_ERR_INVALID_STATE;
+    if (value_len > 29)  return ESP_ERR_INVALID_SIZE;
+    uint8_t payload[32] = {resid, cmd, (uint8_t)value_len};
+    if (value_len > 0) memcpy(&payload[3], value, value_len);
+    esp_err_t ret = ESP_FAIL;
+    /* The servicer occasionally drops a transaction (one write in 14 failed
+     * ESP_ERR_INVALID_STATE at boot). Retry a few times with a short gap. */
+    for (int attempt = 0; attempt < 4; attempt++) {
+        ret = i2c_master_transmit(xvf3800, payload, value_len + 3,
+                                  pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS));
+        if (ret == ESP_OK) break;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (ret != ESP_OK)
+        ESP_LOGW(LOG_TAG, "XVF3800 write resid=%u cmd=%u failed: %s",
+                 resid, cmd, esp_err_to_name(ret));
+    return ret;
+}
+
+static esp_err_t xvf_write_int32(uint8_t resid, uint8_t cmd, int32_t value) {
+    uint8_t payload[4] = {(uint8_t)(value & 0xFF), (uint8_t)((value >> 8) & 0xFF),
+                          (uint8_t)((value >> 16) & 0xFF), (uint8_t)((value >> 24) & 0xFF)};
+    return xvf_write_bytes(resid, cmd, payload, 4);
+}
+
+static esp_err_t xvf_write_float(uint8_t resid, uint8_t cmd, float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, 4);
+    uint8_t payload[4] = {(uint8_t)(bits & 0xFF), (uint8_t)((bits >> 8) & 0xFF),
+                          (uint8_t)((bits >> 16) & 0xFF), (uint8_t)((bits >> 24) & 0xFF)};
+    return xvf_write_bytes(resid, cmd, payload, 4);
+}
+
+static esp_err_t xvf_write_u8_pair(uint8_t resid, uint8_t cmd, uint8_t a, uint8_t b) {
+    uint8_t payload[2] = {a, b};
+    return xvf_write_bytes(resid, cmd, payload, 2);
+}
+
+/* LED bridge for rgb.c (GPO servicer, resid 20). The rgb task starts before
+ * audio init creates the I2C bus/device — block until the XVF device handle
+ * exists (xvf3800 is set by pipecat_init_audio_capture's probe), then write.
+ * xvf_write_bytes returns INVALID_STATE while NULL; the rgb task retries. */
+/* Bus-ready gate for rgb.c: the I2C bus + XVF device don't exist until audio
+ * init (deferred past DTLS for heap reasons). rgb_task blocks here until the
+ * probe succeeds, then pushes its queued BOOT/WIFI states. Called from
+ * pipecat_init_audio_capture AFTER the probe-with-retry succeeds. */
+static volatile bool xvf_bus_ready = false;
+
+extern "C" bool xvf_led_bus_ready(void) { return xvf_bus_ready; }
+
+extern "C" esp_err_t xvf_led_write(uint8_t cmd, const uint8_t *payload, size_t len) {
+    if (len > 29) return ESP_ERR_INVALID_SIZE;
+    return xvf_write_bytes(20, cmd, payload, len);
+}
+
+/* Read path per Seeed wiki frame format: write [resid][cmd|0x80][read_len+1],
+ * then read [status][data...]. Status 0 = OK, 0x40 (64) = retry. */
+static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd,
+                                uint8_t *out, size_t out_len) {
+    if (xvf3800 == NULL) return ESP_ERR_INVALID_STATE;
+    uint8_t req[3] = {resid, (uint8_t)(cmd | XVF_READ_BIT), (uint8_t)(out_len + 1)};
+    uint8_t resp[36] = {0};
+    for (int attempt = 0; attempt < 4; attempt++) {
+        esp_err_t ret = i2c_master_transmit_receive(
+            xvf3800, req, sizeof(req), resp, out_len + 1,
+            pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS));
+        if (ret != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+        if (resp[0] == XVF_CTRL_WAIT) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }  /* servicer busy */
+        if (resp[0] != XVF_CTRL_DONE) return ESP_ERR_INVALID_RESPONSE;
+        memcpy(out, &resp[1], out_len);
+        return ESP_OK;
+    }
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t xvf_read_float(uint8_t resid, uint8_t cmd, float *value) {
+    uint32_t bits;
+    esp_err_t ret = xvf_read_bytes(resid, cmd, (uint8_t *)&bits, 4);
+    if (ret == ESP_OK) memcpy(value, &bits, 4);
+    return ret;
+}
+
+/* Firmware version: Application Servicer (resid 48), VERSION cmd 0, 3 bytes */
+static esp_err_t xvf_read_version(uint8_t ver[3]) {
+    return xvf_read_bytes(48, 0, ver, 3);
+}
+
+/* Boot-time DSP profile for a MIC-ONLY node on the v1.0.8_48k MASTER image
+ * (Seeed wiki command map, verified 2026-09-19). GAIN-ONLY and deliberately
+ * minimal: the master image's stock routing already puts ASR beam 0 on both
+ * I2S slots (v1.0.7+ default), so no routing writes. The old profile's
+ * AUDIO_MGR command numbers came from Kyzcreig's v6.34.4 image — WRONG on
+ * v1.0.8 (cmd 21 is OP_R_PK1, a routing register!). Only two knobs:
+ *   - MIC_GAIN (cmd 0): analog gain before SHF. Old slave image gave speech
+ *     peaks ~26k; master image defaults leave speech at ~4.8k (~-16dB) —
+ *     OWW scores 0.00 on it. Kyzcreig ships 60.0.
+ *   - AGC (PP cmds 10-13, verified same IDs on v1.0.8): on, desired level
+ *     0.0045 (Kyzcreig's), max gain 64 — levels far-field speech without
+ *     near-field clipping. Limiter ON guards the AGC top end.
+ * Readback-verified: every write is read back and logged (gain-staging
+ * postmortem: one variable at a time, counters visible). */
+static void configure_xvf3800_dsp_profile() {
+    if (xvf3800 == NULL) return;
+    uint32_t ok = 0, total = 0;
+    auto record = [&ok, &total](esp_err_t ret) { total++; if (ret == ESP_OK) ok++; };
+
+    /* Mic gain, analog stage (AUDIO_MGR cmd 0 on v1.0.8 — Seeed wiki) */
+    record(xvf_write_float(XVF_RESID_AUDIO_MGR, XVF_CMD_AUDIO_MGR_MIC_GAIN, 60.0f));
+    /* AGC on (PP cmd 10/11/12/13 — same IDs on v1.0.8 per wiki) */
+    record(xvf_write_float(XVF_RESID_PP, XVF_CMD_PP_AGCDESIREDLEVEL, 0.0045f));
+    record(xvf_write_float(XVF_RESID_PP, XVF_CMD_PP_AGCMAXGAIN, 64.0f));
+    record(xvf_write_int32(XVF_RESID_PP, XVF_CMD_PP_AGCONOFF, 1));
+    record(xvf_write_int32(XVF_RESID_PP, XVF_CMD_PP_LIMITONOFF, 1));
+
+    /* Readback: AGC gain reflects the applied profile; version proves the
+     * servicer protocol. Log everything — no write is trusted unread. */
+    float agc_gain = -1.0f;
+    if (xvf_read_float(XVF_RESID_PP, XVF_CMD_PP_AGCGAIN, &agc_gain) == ESP_OK)
+        ESP_LOGI(LOG_TAG, "XVF3800 readback: AGC_GAIN=%.3f", (double)agc_gain);
+    float mic_gain = -1.0f;
+    if (xvf_read_float(XVF_RESID_AUDIO_MGR, XVF_CMD_AUDIO_MGR_MIC_GAIN, &mic_gain) == ESP_OK)
+        ESP_LOGI(LOG_TAG, "XVF3800 readback: MIC_GAIN=%.1f", (double)mic_gain);
+    uint8_t ver[3] = {0, 0, 0};
+    if (xvf_read_version(ver) == ESP_OK)
+        ESP_LOGI(LOG_TAG, "XVF3800 readback: firmware v%u.%u.%u", ver[0], ver[1], ver[2]);
+
+    ESP_LOGI(LOG_TAG, "XVF3800 DSP profile applied: %lu/%lu writes ok",
+             (unsigned long)ok, (unsigned long)total);
+}
+
 /* ── Hardware init ──────────────────────────────────────────────────────── */
-void pipecat_init_audio_capture() {
-    /* I2C master bus — for the XVF3800 control interface + diagnostics */
+/* Early I2C init (called from app_main BEFORE WiFi): the LED ring needs the
+ * XMOS reachable during boot/WiFi states, and the audio init that previously
+ * created this bus runs only after the WebRTC DTLS handshake (large
+ * contiguous internal-RAM allocations must complete first). I2C itself
+ * allocates only a few KB — safe early. The probe-with-retry here also means
+ * audio init inherits a verified device instead of re-probing. */
+void pipecat_init_i2c_early() {
     i2c_master_bus_config_t bus_cfg = {};
     bus_cfg.i2c_port                     = I2C_PORT;
     bus_cfg.sda_io_num                   = I2C_SDA_PIN;
@@ -76,55 +261,129 @@ void pipecat_init_audio_capture() {
     bus_cfg.flags.enable_internal_pullup = true;
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &i2c_bus));
 
-    /* XVF3800 probe — proves the flashed firmware is alive on the bus */
+    /* XVF3800 probe — proves the flashed firmware is alive on the bus.
+     * The handle is KEPT: the DSP profile below needs it. */
     i2c_device_config_t xvf_dev = {};
     xvf_dev.dev_addr_length = I2C_ADDR_BIT_LEN_7;
     xvf_dev.device_address  = XVF3800_ADDR;
-    i2c_master_dev_handle_t xvf_handle;
-    if (i2c_master_bus_add_device(i2c_bus, &xvf_dev, &xvf_handle) == ESP_OK) {
-        uint8_t dummy;
-        if (i2c_master_receive(xvf_handle, &dummy, 1, 10) == ESP_OK)
-            ESP_LOGI(LOG_TAG, "XVF3800 detected @ 0x%02x", XVF3800_ADDR);
-        else
+    xvf_dev.scl_speed_hz    = 100000;  /* IDF 5.3: required or add_device fails */
+    if (i2c_master_bus_add_device(i2c_bus, &xvf_dev, &xvf3800) == ESP_OK) {
+        /* The XMOS I2C servicer NACKs for the first seconds after power-up
+         * (observed: probe at t+7.5s failed, bus scan found 0x2c at t+8.4s).
+         * i2c_master_probe on the BUS (Kyzcreig's pattern) avoids leaving
+         * the device driver in a bad state; retry until it answers. */
+        bool alive = false;
+        for (int attempt = 0; attempt < 50 && !alive; attempt++) {
+            if (i2c_master_probe(i2c_bus, XVF3800_ADDR, pdMS_TO_TICKS(100)) == ESP_OK) {
+                alive = true;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (alive) {
+            ESP_LOGI(LOG_TAG, "XVF3800 detected @ 0x%02x (early)", XVF3800_ADDR);
+            xvf_bus_ready = true;  /* unblock the rgb task's early-state flush */
+        } else {
             ESP_LOGE(LOG_TAG, "XVF3800 NOT responding @ 0x%02x!", XVF3800_ADDR);
-        i2c_master_bus_rm_device(xvf_handle);
+            i2c_master_bus_rm_device(xvf3800);
+            xvf3800 = NULL;
+        }
+    }
+}
+
+void pipecat_init_audio_capture() {
+    /* I2C bus + XVF probe were done EARLY (pipecat_init_i2c_early, before
+     * WiFi) so the LED ring can reach the XMOS during boot states. Audio
+     * init here assumes xvf3800 is already probed; if the early probe
+     * failed, there is nothing to capture — bail loudly. */
+    if (xvf3800 == NULL) {
+        ESP_LOGE(LOG_TAG, "XVF3800 absent — audio init aborted (early probe failed?)");
+        return;
     }
 
-    /* I2S scan (diagnostics, same as v1) */
-    ESP_LOGI(LOG_TAG, "I2C scan:");
-    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-        i2c_device_config_t scan_dev = {};
-        scan_dev.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-        scan_dev.device_address  = addr;
-        i2c_master_dev_handle_t scan_handle;
-        if (i2c_master_bus_add_device(i2c_bus, &scan_dev, &scan_handle) != ESP_OK) continue;
-        uint8_t dummy;
-        esp_err_t e = i2c_master_receive(scan_handle, &dummy, 1, 10);
-        i2c_master_bus_rm_device(scan_handle);
-        if (e == ESP_OK) ESP_LOGI(LOG_TAG, "  I2C device @ 0x%02x", addr);
-    }
-    ESP_LOGI(LOG_TAG, "I2C scan done");
+    /* NO bus scan — ever. The old 112-address scan hammered the bus with
+     * NACKs right when the XMOS servicer was coming up and wedged it
+     * (2026-09-15). Probe once, configure. */
 
-    /* I2S — STEREO, 32-bit, 16 kHz; ESP32 master, XVF3800 slave.
-     * No MCLK: the XVF3800 slave firmware clocks from BCLK/WS only. */
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
+    /* I2S — Option B (2026-09-19): the XMOS was reflashed with the I2S-
+     * MASTER image (v1.0.8_48k, the native-48k twin of the old slave image,
+     * same v1.0.8 register map). The XMOS now drives BCLK/WS itself and does
+     * NOT want an MCLK from us (Kyzcreig's tested pairing: DFU image drives
+     * the bus, ESP32 is the I2S SLAVE — both-masters = bit-smeared garbage,
+     * rail-pinned peaks; master/slave mismatch = the role-inversion trap).
+     *
+     * BUS RATE = 48k native: real audio lands in the HIGH 16 bits of EVERY
+     * stereo frame — no 1-in-3 zero-pad pattern (that was the 16k slave
+     * image), so extraction is a plain 6-word average per 16k output sample
+     * (Kyzcreig's linear decimator: boxcar LP, keeps formants for STT). */
+    i2s_chan_config_t chan_cfg = {};
+    chan_cfg.id = I2S_PORT;
+    chan_cfg.role = I2S_ROLE_SLAVE;
+    /* Kyzcreig runs 12x511 (~49KB/channel) — does NOT fit XIAO internal RAM
+     * next to WiFi/WebRTC (note-011 trap #7; boot53 pre-I2S DMA heap was
+     * 35KB). 6x300 = 37.5ms of RX headroom in ~29KB. */
+    chan_cfg.dma_desc_num = 6;
+    chan_cfg.dma_frame_num = 300;
+    chan_cfg.auto_clear_after_cb = true;
+    chan_cfg.auto_clear_before_cb = false;
+    chan_cfg.intr_priority = 0;
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_chan, &rx_chan));
 
+    /* Budget print: how much DMA-capable (internal) RAM is left at audio-init */
+    ESP_LOGI(LOG_TAG, "pre-I2S DMA heap: free=%u largest=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+
     i2s_std_config_t std_cfg = {};
-    std_cfg.clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE);
-    std_cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-                           I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO);
-    std_cfg.gpio_cfg.mclk = GPIO_NUM_NC;   /* XVF3800 needs no MCLK */
+    std_cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(XVF_NATIVE_RATE);
+    std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;   /* 48k x 256 = 12.288MHz */
+    std_cfg.slot_cfg = {};
+    std_cfg.slot_cfg.data_bit_width = I2S_DATA_BIT_WIDTH_32BIT;
+    std_cfg.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO;
+    std_cfg.slot_cfg.slot_mode = I2S_SLOT_MODE_STEREO;
+    std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
+    std_cfg.slot_cfg.ws_width = I2S_DATA_BIT_WIDTH_32BIT;
+    std_cfg.slot_cfg.ws_pol = false;
+    std_cfg.slot_cfg.bit_shift = true;
+    std_cfg.slot_cfg.left_align = true;
+    std_cfg.slot_cfg.big_endian = false;
+    std_cfg.slot_cfg.bit_order_lsb = false;
+    std_cfg.gpio_cfg.mclk = GPIO_NUM_NC;   /* master image: XMOS drives itself, no MCLK from us */
     std_cfg.gpio_cfg.bclk = I2S_BCLK_PIN;
     std_cfg.gpio_cfg.ws   = I2S_LRCK_PIN;
     std_cfg.gpio_cfg.dout = I2S_DOUT_PIN;
     std_cfg.gpio_cfg.din  = I2S_DIN_PIN;
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_chan, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_chan, &std_cfg));
+    /* Stash the std config so the heal path can do a FULL teardown + re-init
+     * (disable/enable alone leaves MCLK running and never re-rolls the
+     * XMOS lock — 12/12 heals failed that way on 2026-09-16). */
+    g_std_cfg = std_cfg;
+    g_chan_cfg = chan_cfg;
     ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
 
-    ESP_LOGI(LOG_TAG, "Audio ready: XVF3800 I2S-slave stereo32 @ %d Hz", SAMPLE_RATE);
+    ESP_LOGI(LOG_TAG, "Audio ready: XVF3800 I2S MASTER (v1.0.8_48k image), ESP32 slave @ %d Hz", XVF_NATIVE_RATE);
+
+    /* XVF params are volatile (lost on XMOS power-cycle). NOTE (2026-09-19):
+     * with the master image the XMOS drives its own clocks, so the old
+     * "wait for MCLK lock" rationale is gone. Profile stays OFF for the first
+     * master-image bring-up — stock defaults on v1.0.8 route both I2S outs
+     * to ASR beam 0 (v1.0.7 changelog), which is what a mic-only node wants;
+     * revisit echo_onoff=0 etc. only with readback evidence. */
+    vTaskDelay(pdMS_TO_TICKS(300));
+#ifndef XVF_APPLY_PROFILE
+#define XVF_APPLY_PROFILE 1   /* ON (2026-09-19): master image's stock gain leaves speech ~-16dB
+                               * vs the old slave image; OWW scores 0.00 on it. Gain-only profile
+                               * (MIC_GAIN 60 + AGC, Seeed v1.0.8 cmd IDs, readback-verified) —
+                               * no routing/AEC writes this time. Old OFF verdict applied to the
+                               * WRONG cmd map + slave image (see design note). */
+#endif
+#if XVF_APPLY_PROFILE
+    configure_xvf3800_dsp_profile();
+#else
+    ESP_LOGW(LOG_TAG, "XVF3800 DSP profile SKIPPED (A/B: XVF_APPLY_PROFILE=0)");
+#endif
 }
 
 /* ── Opus decoder — incoming bot audio (decoded for turn-lock only) ─────── */
@@ -142,7 +401,14 @@ void pipecat_audio_decode(uint8_t *data, size_t size) {
     /* No local speaker (Sonos carries the reply) — decode only to track
      * is_playing, which zeroes the mic while the bot speaks (node-side
      * turn lock; the room mic still hears the Sonos audio acoustically,
-     * so the appliance-side gates stay armed too). */
+     * so the appliance-side gates stay armed too).
+     *
+     * 2026-09-16: the bot streams 3-byte opus DTX/silence frames back
+     * continuously; the decoder's comfort noise on those is > ±1, which
+     * pinned is_playing=true forever and zeroed the mic (diag showed 26k
+     * peaks, wire showed 7-byte silence). Only decode real speech-sized
+     * frames — tiny ones are silence by definition. */
+    if (size <= 3) { is_playing = false; return; }
     int n = opus_decode(opus_decoder, data, size, decoder_buffer, PCM_MONO_SAMPLES, 0);
     if (n <= 0) return;
     update_is_playing(decoder_buffer, n);
@@ -151,7 +417,7 @@ void pipecat_audio_decode(uint8_t *data, size_t size) {
 /* ── Opus encoder (mic in) ──────────────────────────────────────────────── */
 static OpusEncoder *opus_encoder          = NULL;
 static uint8_t     *encoder_output_buffer = NULL;
-static int32_t     *mic_stereo32          = NULL;
+static int32_t     *mic_stereo48          = NULL;
 static int16_t     *mic_mono16            = NULL;
 
 void pipecat_init_audio_encoder() {
@@ -161,25 +427,101 @@ void pipecat_init_audio_encoder() {
     opus_encoder_ctl(opus_encoder, OPUS_SET_BITRATE(OPUS_ENCODER_BITRATE));
     opus_encoder_ctl(opus_encoder, OPUS_SET_COMPLEXITY(OPUS_ENCODER_COMPLEXITY));
     opus_encoder_ctl(opus_encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
-    mic_stereo32          = (int32_t *)heap_caps_malloc(HW_STEREO32_BYTES, MALLOC_CAP_DEFAULT);
+    mic_stereo48          = (int32_t *)heap_caps_malloc(HW48_STEREO32_BYTES, MALLOC_CAP_DEFAULT);
     mic_mono16            = (int16_t *)malloc(PCM_MONO_BYTES);
     encoder_output_buffer = (uint8_t *)malloc(OPUS_BUFFER_SIZE);
 }
 
 void pipecat_send_audio(PeerConnection *peer_connection) {
     size_t bytes_read = 0;
-    if (i2s_channel_read(rx_chan, mic_stereo32, HW_STEREO32_BYTES,
-                          &bytes_read, pdMS_TO_TICKS(I2S_READ_TIMEOUT_MS)) != ESP_OK) {
-        ESP_LOGE(LOG_TAG, "i2s_channel_read failed");
+    /* 48k bus: 20ms = 960 stereo32 frames (7680B). The 16k image fills one
+     * frame in three; the read path below is phase-independent. */
+    if (mic_stereo48 == NULL) return;
+    esp_err_t rc = i2s_channel_read(rx_chan, mic_stereo48, HW48_STEREO32_BYTES,
+                                    &bytes_read, pdMS_TO_TICKS(I2S_READ_TIMEOUT_MS));
+    if (rc != ESP_OK) {
+        static int err_count = 0;
+        if (++err_count % 50 == 1) {  // log the code, throttled
+            ESP_LOGE(LOG_TAG, "i2s_channel_read: %s (0x%x)",
+                     esp_err_to_name(rc), rc);
+        }
         return;
     }
-    if (bytes_read < HW_STEREO32_BYTES) return;  /* partial frame: drop */
-    /* stereo32 -> mono16: left channel, high 16 bits (unchanged from v1) */
+    if (bytes_read < HW48_STEREO32_BYTES) return;  /* partial frame: drop */
+    /* stereo32@48k NATIVE (master image) -> mono16@16k. Audio in the HIGH 16
+     * bits of every frame; linear boxcar decimation over all 6 words per
+     * output sample (Kyzcreig's proven decimator — LP before downsample,
+     * formants survive for STT). lo16 kept in diag only to catch a bit-layout
+     * surprise (note-011 trap #8: layout changes with the image — VERIFY with
+     * the raw dumps, don't assume). */
+    static int32_t diag_peak_hi = 0;
+    static int32_t diag_peak_lo = 0;
+    static uint32_t diag_frames = 0;
+    static uint32_t diag_dumped = 0;
     for (int i = 0; i < PCM_MONO_SAMPLES; i++) {
-        mic_mono16[i] = (int16_t)(mic_stereo32[2 * i] >> 16);
+        const int32_t *f = &mic_stereo48[6 * i];      /* 3 stereo frames */
+        int32_t acc = (f[0] >> 16) + (f[1] >> 16) + (f[2] >> 16) +
+                      (f[3] >> 16) + (f[4] >> 16) + (f[5] >> 16);
+        acc /= 6;
+        if (acc > 32767) acc = 32767; else if (acc < -32768) acc = -32768;
+        int16_t hi = (int16_t)acc;
+        int16_t lo = (int16_t)((f[0] | f[1] | f[2]) & 0xFFFF);
+        int32_t a = hi < 0 ? -hi : hi; if (a > diag_peak_hi) diag_peak_hi = a;
+        int32_t b = lo < 0 ? -lo : lo; if (b > diag_peak_lo) diag_peak_lo = b;
+        /* Dump one 3-frame group every 5 s unconditionally (first 12 dumps),
+         * plus loud ones: settles the real word layout with evidence. */
+        if (i == 20 && ((diag_frames % 250 == 0 && diag_dumped < 12) || (a > 2000 && diag_dumped < 24))) {
+            diag_dumped++;
+            ESP_LOGI(LOG_TAG, "LOUD raw[%lu]: %08x %08x %08x %08x %08x %08x",
+                     (unsigned long)diag_frames,
+                     (unsigned)f[0], (unsigned)f[1], (unsigned)f[2],
+                     (unsigned)f[3], (unsigned)f[4], (unsigned)f[5]);
+        }
+        mic_mono16[i] = hi;
+    }
+    if (++diag_frames % 50 == 0) {  /* once per second at 50 fps */
+        ESP_LOGI(LOG_TAG, "mic diag: hi16_peak=%d lo16_peak=%d frames=%lu muted=%d",
+                 (int)diag_peak_hi, (int)diag_peak_lo, (unsigned long)diag_frames, is_playing ? 1 : 0);
+        /* SELF-HEAL (2026-09-16): the XMOS I2S-slave output engages at
+         * startup only sometimes (a lock lottery vs. our MCLK/BCLK start;
+         * a XIAO-only reset drops MCLK for ~7s and re-rolls it). A live bus
+         * never reads all-zero — even a silent room shows codec LSB noise in
+         * lo16 — so 3 consecutive all-zero seconds == dead bus. Re-cycle the
+         * I2S channels (drops and restores MCLK/BCLK/WS) to re-roll until it
+         * locks. Bounded so a truly broken bus can't loop forever. */
+        static int dead_secs = 0, heals = 0;
+        if (diag_peak_hi == 0 && diag_peak_lo == 0) {
+            if (++dead_secs >= 3 && heals < 12) {
+                heals++;
+                ESP_LOGW(LOG_TAG, "I2S bus dead %ds — re-cycling channels (heal #%d)", dead_secs, heals);
+                i2s_channel_disable(rx_chan);
+                i2s_channel_disable(tx_chan);
+                vTaskDelay(pdMS_TO_TICKS(150));
+                i2s_channel_enable(tx_chan);
+                i2s_channel_enable(rx_chan);
+                dead_secs = 0;
+            }
+        } else {
+            if (dead_secs > 0 || heals > 0) ESP_LOGI(LOG_TAG, "I2S bus LIVE (after %d heals)", heals);
+            dead_secs = 0;
+        }
+        diag_peak_hi = 0;
+        diag_peak_lo = 0;
     }
     if (is_playing) { memset(mic_mono16, 0, PCM_MONO_BYTES); }
     auto n = opus_encode(opus_encoder, (const opus_int16 *)mic_mono16,
                          PCM_MONO_SAMPLES, encoder_output_buffer, OPUS_BUFFER_SIZE);
+    /* Encoder-side diag: what actually leaves the node. If mic peaks are
+     * high but every packet is 7 bytes (DTX/silence), the loss is between
+     * mic_mono16 and the wire — encoder input or encoder state. */
+    static int32_t enc_in_peak = 0; static int enc_max = 0, enc_cnt = 0;
+    for (int i = 0; i < PCM_MONO_SAMPLES; i++) {
+        int32_t v = mic_mono16[i]; if (v < 0) v = -v; if (v > enc_in_peak) enc_in_peak = v;
+    }
+    if (n > enc_max) enc_max = n;
+    if (++enc_cnt % 50 == 0) {
+        ESP_LOGI(LOG_TAG, "enc diag: in_peak=%d max_pkt=%d", (int)enc_in_peak, enc_max);
+        enc_in_peak = 0; enc_max = 0;
+    }
     if (n > 0) peer_connection_send_audio(peer_connection, encoder_output_buffer, n);
 }

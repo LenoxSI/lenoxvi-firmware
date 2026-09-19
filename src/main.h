@@ -10,6 +10,7 @@ extern void pipecat_init_wifi();
 
 // WebRTC / Media
 extern void pipecat_init_audio_capture();
+extern void pipecat_init_i2c_early();
 extern void pipecat_init_audio_decoder();
 extern void pipecat_init_audio_encoder();
 extern void pipecat_send_audio(PeerConnection *peer_connection);

@@ -81,6 +81,7 @@ static void rtvi_handle_message(const rtvi_msg_t *msg) {
     ESP_LOGE(LOG_TAG, "Unable to find `type` field in RTVI message");
     return;
   }
+  ESP_LOGI(LOG_TAG, "RTVI dispatch: type=%s", j_type->valuestring);
 
   switch (hash(j_type->valuestring)) {
     case hash("bot-started-speaking"):
@@ -122,8 +123,27 @@ void pipecat_init_rtvi(PeerConnection *connection,
   peer_connection = connection;
   rtvi_callbacks = callbacks;
 
-  rtvi_queue = xQueueCreate(10, sizeof(rtvi_msg_t));
-  xTaskCreatePinnedToCore(rtvi_task, "RTVI Task", 4096, NULL, 2, NULL, 1);
+  rtvi_queue = xQueueCreate(20, sizeof(rtvi_msg_t));
+  /* RTVI task stack: bot-output/bot-tts-text messages carry full sentence
+   * payloads; cJSON parse + data walks overflowed a 4096 stack (2026-09-19).
+   * But an 8192-word internal-RAM stack makes xTaskCreatePinnedToCore
+   * SILENTLY FAIL at this point in boot (heap nearly exhausted after
+   * WiFi+WebRTC+audio DMA; observed: 29 DC messages delivered, ZERO
+   * dispatches — no task existed to consume them). Same fix as the audio
+   * publisher task: static allocation with the stack in PSRAM. */
+  static StaticTask_t rtvi_task_buffer;
+  static StackType_t *rtvi_stack = NULL;
+  if (rtvi_stack == NULL) {  /* survive re-init after watchdog reboot */
+    rtvi_stack = (StackType_t *)heap_caps_malloc(8192 * sizeof(StackType_t),
+                                                 MALLOC_CAP_SPIRAM);
+  }
+  if (rtvi_stack != NULL) {
+    xTaskCreateStaticPinnedToCore(rtvi_task, "RTVI Task", 8192, NULL, 5,
+                                 rtvi_stack, &rtvi_task_buffer, 0);
+    ESP_LOGI(LOG_TAG, "RTVI task spawned (PSRAM stack)");
+  } else {
+    ESP_LOGE(LOG_TAG, "RTVI PSRAM stack alloc failed");
+  }
 }
 
 void pipecat_rtvi_send_client_ready() {
@@ -147,5 +167,14 @@ void pipecat_rtvi_handle_message(const char *msg) {
 
   rtvi_msg_t rtvi_msg = {.msg = j_msg};
 
-  xQueueSend(rtvi_queue, &rtvi_msg, portMAX_DELAY);
+  /* Non-blocking: the SCTP receive context must never wedge on a full queue.
+   * Drop oldest if full (LED state is cosmetic; a dropped oww-awake just
+   * means one missed color change, not a dead data channel). */
+  if (xQueueSend(rtvi_queue, &rtvi_msg, 0) != pdTRUE) {
+    rtvi_msg_t oldest;
+    if (xQueueReceive(rtvi_queue, &oldest, 0) == pdTRUE) {
+      cJSON_Delete(oldest.msg);
+    }
+    xQueueSend(rtvi_queue, &rtvi_msg, 0);
+  }
 }

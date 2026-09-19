@@ -2,112 +2,96 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <math.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 static const char *TAG = "rgb";
 
-// ── Driver handle ─────────────────────────────────────────────
-static led_strip_handle_t strip = NULL;
+/* ── reSpeaker XVF3800 LED ring over I2C ──────────────────────────────────
+ * The 12-LED ring on the reSpeaker board is owned and driven by the XMOS,
+ * NOT by a WS2812 strip on the ESP32 (that was the Waveshare board's setup —
+ * GPIO38 writes went nowhere on this board; "no LEDs" bug, 2026-09-19).
+ *
+ * We set state by writing the XMOS GPO servicer over I2C (Seeed v1.0.8 map):
+ *   resid 20: LED_EFFECT (cmd 12) 0=off 1=breathing 2=rainbow 3=solid 4=DOA 5=ring
+ *             LED_BRIGHTNESS (cmd 13) 0..255
+ *             LED_COLOR (cmd 16) uint32 RGB (single byte payload = value)
+ *             LED_RING_COLOR (cmd 19) 12 × uint32
+ * The XMOS animates effects 1/2/4/5 itself — we only push state changes.
+ *
+ * I2C primitives live in media.cpp (xvf3800 device handle, probe-with-retry
+ * at boot). rgb calls into them via a small bridge so this file stays
+ * board-agnostic in shape. */
+
+/* State → XMOS effect mapping (colors chosen to match the old ring semantics):
+ *   BOOT            → breathing, blue      (power-up)
+ *   WIFI_CONNECTING → breathing, amber
+ *   WIFI_UP         → solid dim amber
+ *   BRIDGE_CONNECTED→ off                  (dark when idle — dark-room rule)
+ *   LISTENING       → solid, purple        (wake word accepted)
+ *   PROCESSING      → breathing, cyan      (STT/LLM work)
+ *   SPEAKING        → solid, cyan          (TTS out the Sonos)
+ *   ERROR           → breathing, red
+ *   DARK            → off */
+
+typedef struct {
+    uint8_t effect;   /* GPO cmd 12 value */
+    uint8_t brightness; /* GPO cmd 13 value (0..255) */
+    uint32_t color;   /* GPO cmd 16 value (0x00RRGGBB) */
+} led_effect_t;
+
+#define XVF_GPO_RESID        20
+#define XVF_CMD_LED_EFFECT   12
+#define XVF_CMD_LED_BRIGHT   13
+#define XVF_CMD_LED_COLOR    16
+
+/* Bridge into media.cpp's XVF control plane (C linkage: rgb.c is C, media.cpp is C++) */
+#ifdef __cplusplus
+extern "C" {
+esp_err_t xvf_led_write(uint8_t cmd, const uint8_t *payload, size_t len);
+bool xvf_led_bus_ready(void);
+}
+#else
+extern esp_err_t xvf_led_write(uint8_t cmd, const uint8_t *payload, size_t len);
+extern bool xvf_led_bus_ready(void);
+#endif
+
+static esp_err_t led_set_effect(uint8_t effect) {
+    return xvf_led_write(XVF_CMD_LED_EFFECT, &effect, 1);
+}
+static esp_err_t led_set_brightness(uint8_t bright) {
+    return xvf_led_write(XVF_CMD_LED_BRIGHT, &bright, 1);
+}
+static esp_err_t led_set_color(uint32_t rgb) {
+    uint8_t payload[4] = {(uint8_t)(rgb & 0xFF), (uint8_t)((rgb >> 8) & 0xFF),
+                          (uint8_t)((rgb >> 16) & 0xFF), (uint8_t)((rgb >> 24) & 0xFF)};
+    return xvf_led_write(XVF_CMD_LED_COLOR, payload, 4);
+}
+
+static const led_effect_t *effect_for(rgb_state_t s) {
+    static const led_effect_t EFF_BOOT       = {1, 255, 0x0000FF};
+    static const led_effect_t EFF_WIFI_CONN  = {1, 255, 0xFF9E00};
+    static const led_effect_t EFF_WIFI_UP    = {3,  40, 0xFF9E00};
+    static const led_effect_t EFF_BRIDGE     = {0,   0, 0x000000};
+    static const led_effect_t EFF_LISTENING  = {3, 255, 0x800080};
+    static const led_effect_t EFF_PROCESSING = {1, 255, 0x00FFFF};
+    static const led_effect_t EFF_SPEAKING   = {3, 255, 0x00FFFF};
+    static const led_effect_t EFF_ERROR      = {1, 255, 0xFF0000};
+    static const led_effect_t EFF_DARK       = {0,   0, 0x000000};
+    switch (s) {
+        case RGB_STATE_BOOT:            return &EFF_BOOT;
+        case RGB_STATE_WIFI_CONNECTING: return &EFF_WIFI_CONN;
+        case RGB_STATE_WIFI_UP:         return &EFF_WIFI_UP;
+        case RGB_STATE_BRIDGE_CONNECTED: return &EFF_BRIDGE;
+        case RGB_STATE_LISTENING:       return &EFF_LISTENING;
+        case RGB_STATE_PROCESSING:       return &EFF_PROCESSING;
+        case RGB_STATE_SPEAKING:        return &EFF_SPEAKING;
+        case RGB_STATE_ERROR:           return &EFF_ERROR;
+        default:                        return &EFF_DARK;
+    }
+}
 
 // ── Shared state ──────────────────────────────────────────────
 static volatile rgb_state_t current_state = RGB_STATE_BOOT;
 static volatile rgb_state_t rendered_state = RGB_STATE_DARK;
-
-// ── Brightness helper ─────────────────────────────────────────
-// Channel values are 0–255 pre-brightness; we scale by bright/255.
-static inline uint8_t scale(uint8_t v, uint8_t bright) {
-    return (uint16_t)v * bright / 255;
-}
-
-// ── Set all 7 pixels to the same color ────────────────────────
-static void set_all_rgb(uint8_t r, uint8_t g, uint8_t b, uint8_t bright) {
-    uint8_t sr = scale(r, bright);
-    uint8_t sg = scale(g, bright);
-    uint8_t sb = scale(b, bright);
-    for (int i = 0; i < RGB_LED_COUNT; i++) {
-        led_strip_set_pixel(strip, i, sr, sg, sb);
-    }
-    led_strip_refresh(strip);
-}
-
-static void set_all_off(void) {
-    led_strip_clear(strip);
-}
-
-// ── Per-state render frames ───────────────────────────────────
-// Each returns true if the caller should loop (animated) or false
-// if the state is solid and the task should block until a change.
-
-static bool render_boot(void) {
-    // White fade-in/fade-out, 200ms total
-    for (int b = 0; b <= RGB_BRIGHTNESS_MAX; b += 15) {
-        set_all_rgb(255, 255, 255, b);
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    for (int b = RGB_BRIGHTNESS_MAX; b >= 0; b -= 15) {
-        set_all_rgb(255, 255, 255, b);
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    set_all_off();
-    return false;  // one-shot
-}
-
-static bool render_wifi_connecting(void) {
-    set_all_rgb(255, 200, 0, 77);   // yellow, 30%
-    return false;
-}
-
-static bool render_wifi_up(void) {
-    set_all_rgb(255, 200, 0, 153);  // yellow, 60%
-    return false;
-}
-
-static bool render_bridge_connected(void) {
-    // Lights off when idle — don't light up a dark room
-    set_all_off();
-    return false;
-}
-
-static bool render_listening(void) {
-    // Purple solid — wake word accepted, listening for user speech
-    set_all_rgb(128, 0, 128, 128);  // purple, 50%
-    return false;
-}
-
-static bool render_processing(void) {
-    // Cyan pulse: 300ms on, 200ms off
-    set_all_rgb(0, 255, 255, 179);   // 70%
-    vTaskDelay(pdMS_TO_TICKS(300));
-    set_all_off();
-    vTaskDelay(pdMS_TO_TICKS(200));
-    return true;
-}
-
-static bool render_speaking(void) {
-    set_all_rgb(0, 255, 255, 179);   // cyan solid, 70%
-    return false;
-}
-
-static bool render_error(void) {
-    // Red blink: 100ms on/off × 3, then 1s pause
-    for (int i = 0; i < 3; i++) {
-        set_all_rgb(255, 0, 0, 200);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        set_all_off();
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    return true;
-}
-
-static bool render_dark(void) {
-    set_all_off();
-    return false;
-}
 
 // ── State priority ───────────────────────────────────────────
 // Higher enum value = higher priority. We only switch to a new
@@ -115,10 +99,6 @@ static bool render_dark(void) {
 // Exception: BOOT is one-shot and drops to the next state after.
 
 static bool should_switch(rgb_state_t proposed) {
-    // BOOT, DARK, and BRIDGE_CONNECTED always pass — they're resets/clears,
-    // not downgrades.  BRIDGE_CONNECTED fires on every fresh WebRTC connect
-    // and must override stale states (e.g. SPEAKING left over from a prior
-    // connection that died without a clean disconnect).
     if (rendered_state == RGB_STATE_BOOT && proposed != RGB_STATE_BOOT)
         return true;
     if (proposed == RGB_STATE_DARK || proposed == RGB_STATE_BRIDGE_CONNECTED)
@@ -129,48 +109,45 @@ static bool should_switch(rgb_state_t proposed) {
 // ── Render task ──────────────────────────────────────────────
 
 static void rgb_task(void *arg) {
-    bool animated = false;
-
+    /* The I2C bus doesn't exist until WebRTC-connect audio init (DTLS heap
+     * ordering — see media.cpp). Until then, keep the latest state and DON'T
+     * spam failed writes; the moment the bus is ready, the states in
+     * current_state render for real. This is why boot/WiFi amber never
+     * showed (2026-09-19): writes before bus-ready all died. */
+    bool bus_ready_flushed = false;
     for (;;) {
+        if (!bus_ready_flushed) {
+            if (!xvf_led_bus_ready()) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+            rendered_state = RGB_STATE_DARK;  /* force re-render of current */
+            bus_ready_flushed = true;
+        }
         rgb_state_t s = current_state;
 
         if (s != rendered_state) {
             if (!should_switch(s)) {
-                // Lower priority — skip this frame, keep animating current
-                s = rendered_state;
-            } else {
-                rendered_state = s;
-                animated = false;  // reset on state change
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
             }
+            const led_effect_t *eff = effect_for(s);
+            /* Push all three registers; effect order matters (color/bright first
+             * so an effect change applies with them in place). */
+            esp_err_t r1 = led_set_color(eff->color);
+            esp_err_t r2 = led_set_brightness(eff->brightness);
+            esp_err_t r3 = led_set_effect(eff->effect);
+            if (r1 != ESP_OK || r2 != ESP_OK || r3 != ESP_OK) {
+                ESP_LOGW(TAG, "LED write failed (c=%s b=%s e=%s)",
+                         esp_err_to_name(r1), esp_err_to_name(r2), esp_err_to_name(r3));
+                vTaskDelay(pdMS_TO_TICKS(500));  /* retry next tick */
+                continue;
+            }
+            rendered_state = s;
+            ESP_LOGI(TAG, "LED state -> %d (effect=%u bright=%u)", (int)s,
+                     (unsigned)eff->effect, (unsigned)eff->brightness);
         }
 
-        bool loop = false;
-
-        switch (rendered_state) {
-            case RGB_STATE_BOOT:            loop = render_boot();
-                                            if (!loop) {
-                                                // BOOT is one-shot — drop to DARK after fade
-                                                rendered_state = RGB_STATE_DARK;
-                                                current_state = RGB_STATE_DARK;
-                                            }
-                                            break;
-            case RGB_STATE_WIFI_CONNECTING:  loop = render_wifi_connecting(); break;
-            case RGB_STATE_WIFI_UP:          loop = render_wifi_up(); break;
-            case RGB_STATE_BRIDGE_CONNECTED: loop = render_bridge_connected(); break;
-            case RGB_STATE_LISTENING:        loop = render_listening(); break;
-            case RGB_STATE_PROCESSING:       loop = render_processing(); break;
-            case RGB_STATE_SPEAKING:         loop = render_speaking(); break;
-            case RGB_STATE_ERROR:            loop = render_error(); break;
-            case RGB_STATE_DARK:             loop = render_dark(); break;
-        }
-
-        if (loop) {
-            // Animated state — loop back immediately (delay is inside render fn)
-            continue;
-        }
-
-        // Solid state — wait for a state change notification
-        // Poll at 50ms so BOOT→next transition is snappy
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
@@ -178,34 +155,21 @@ static void rgb_task(void *arg) {
 // ── Public API ────────────────────────────────────────────────
 
 void rgb_init(void) {
-    led_strip_config_t strip_cfg = {
-        .strip_gpio_num = RGB_GPIO,
-        .max_leds = RGB_LED_COUNT,
-        .led_model = LED_MODEL_WS2812,
-        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
-        .flags = { .invert_out = false },
-    };
-    led_strip_rmt_config_t rmt_cfg = {
-        .resolution_hz = RGB_RESOLUTION_HZ,
-        .flags.with_dma = false,  // 7 LEDs — no DMA needed
-    };
-    esp_err_t err = led_strip_new_rmt_device(&strip_cfg, &rmt_cfg, &strip);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "led_strip_new_rmt_device failed: %s", esp_err_to_name(err));
-        return;
-    }
-    led_strip_clear(strip);
+    /* XMOS probe happens in media.cpp audio init — but rgb_init runs BEFORE
+     * audio init (main.cpp boot order), and the XVF3800 servicer NACKs for
+     * the first seconds after power-up. So: BOOT state is queued via the
+     * state machine; the render task starts here and retries writes until
+     * the servicer answers. The BOOT effect (blue breathing) lands as soon
+     * as the XMOS is ready — same probe-with-retry pattern as the DSP profile.
+     */
     current_state = RGB_STATE_BOOT;
     rendered_state = RGB_STATE_DARK;
-
-    xTaskCreate(rgb_task, "rgb", 4096, NULL, 5, NULL);
-    ESP_LOGI(TAG, "RGB ring initialized on GPIO%d (%d LEDs)", RGB_GPIO, RGB_LED_COUNT);
+    BaseType_t ok = xTaskCreate(rgb_task, "rgb", 4096, NULL, 4, NULL);
+    if (ok != pdPASS) ESP_LOGE(TAG, "rgb task spawn failed");
 }
 
 void rgb_set_state(rgb_state_t new_state) {
-    if (new_state == current_state) return;
     current_state = new_state;
-    ESP_LOGD(TAG, "state -> %d", new_state);
 }
 
 rgb_state_t rgb_get_state(void) {

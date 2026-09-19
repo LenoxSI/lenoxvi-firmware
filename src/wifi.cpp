@@ -10,6 +10,14 @@
 #include "rgb.h"
 
 static bool g_wifi_connected = false;
+static bool g_webrtc_started = false;
+
+// WebRTC bring-up on its own task — the sys_evt task's stack can't hold
+// DTLS cert generation + ICE + SDP (stack overflow observed 2026-09-15).
+static void pipecat_webrtc_init_task(void *user_data) {
+  pipecat_init_webrtc();
+  vTaskDelete(NULL);
+}
 
 static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data) {
@@ -30,6 +38,17 @@ static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
     g_wifi_connected = true;
     s_retry_num = 0;  // reset retry counter on successful connection
     rgb_set_state(RGB_STATE_WIFI_UP);
+    // WebRTC bring-up runs on its OWN task: it was overflowing the sys_evt
+    // task's stack (DTLS cert gen + ICE + SDP from inside an event handler).
+    if (!g_webrtc_started) {
+      g_webrtc_started = true;
+      static StackType_t webrtc_stack[8192];
+      static StaticTask_t webrtc_task_buf;
+      xTaskCreateStaticPinnedToCore(pipecat_webrtc_init_task, "webrtc_init",
+                                    8192, NULL, 5, webrtc_stack,
+                                    &webrtc_task_buf, 0);
+      ESP_LOGI(LOG_TAG, "WebRTC init task spawned");
+    }
   }
 }
 
