@@ -221,12 +221,28 @@ static void configure_xvf3800_dsp_profile() {
     auto record = [&ok, &total](esp_err_t ret) { total++; if (ret == ESP_OK) ok++; };
 
     /* Mic gain, analog stage (AUDIO_MGR cmd 0 on v1.0.8 — Seeed wiki) */
-    record(xvf_write_float(XVF_RESID_AUDIO_MGR, XVF_CMD_AUDIO_MGR_MIC_GAIN, 60.0f));
+    /* Tuning round 2 (2026-09-19, from live log data): loud/close speech
+     * was degrading wake scores (0.16-0.38 on in_peak 8-10k vs 0.93+ on
+     * normal voice) — AGC overshoot/clipping mangles the spectrogram.
+     * MIC_GAIN 60 -> 55: a little less analog gain = headroom on loud
+     * input. AGCDESIREDLEVEL 0.0045 -> 0.005: slightly higher target so
+     * far-field speech still lands above the wake floor. */
+    record(xvf_write_float(XVF_RESID_AUDIO_MGR, XVF_CMD_AUDIO_MGR_MIC_GAIN, 55.0f));
     /* AGC on (PP cmd 10/11/12/13 — same IDs on v1.0.8 per wiki) */
-    record(xvf_write_float(XVF_RESID_PP, XVF_CMD_PP_AGCDESIREDLEVEL, 0.0045f));
+    record(xvf_write_float(XVF_RESID_PP, XVF_CMD_PP_AGCDESIREDLEVEL, 0.005f));
     record(xvf_write_float(XVF_RESID_PP, XVF_CMD_PP_AGCMAXGAIN, 64.0f));
     record(xvf_write_int32(XVF_RESID_PP, XVF_CMD_PP_AGCONOFF, 1));
     record(xvf_write_int32(XVF_RESID_PP, XVF_CMD_PP_LIMITONOFF, 1));
+    /* Echo suppression + nonlinear attenuation OFF (2026-09-19, the 21:23
+     * mic death): the only remaining zero-stream mechanism on this image.
+     * Stock echo suppression converges on our idle TX line as a far-end
+     * reference and gates the mic to digital zero minutes-to-hours into a
+     * session (observed TWICE: 21:23:33 collapse mid-session, in_peak
+     * 23k -> 90 with no restart/reload boundary). This is a MIC-ONLY node:
+     * no local speaker, echo is handled appliance-side (wake gate turn
+     * lock + echo_gate containment). Suppression was never needed here. */
+    record(xvf_write_int32(XVF_RESID_PP, XVF_CMD_PP_ECHOONOFF, 0));
+    record(xvf_write_int32(XVF_RESID_PP, XVF_CMD_PP_NLATTENONOFF, 0));
 
     /* Readback: AGC gain reflects the applied profile; version proves the
      * servicer protocol. Log everything — no write is trusted unread. */
