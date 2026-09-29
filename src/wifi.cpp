@@ -9,6 +9,7 @@
 #include "main.h"
 #include "rgb.h"
 #include "settings.h"
+#include "cmd.h"
 
 static bool g_wifi_connected = false;
 static bool g_webrtc_started = false;

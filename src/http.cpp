@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "main.h"
+#include "settings.h"
 
 #ifndef MIN
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))

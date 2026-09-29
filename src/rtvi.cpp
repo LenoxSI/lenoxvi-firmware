@@ -178,9 +178,13 @@ void pipecat_rtvi_send_client_ready() {
 
 void pipecat_rtvi_send_raw(const char *json) {
   /* Raw JSON send for command-schema replies (cmd.cpp) — no label/id
-   * scaffolding; the caller owns the full envelope. */
+   * scaffolding; the caller owns the full envelope. libpeer's send
+   * takes char* (non-const); cast is safe (it does not modify). */
   if (peer_connection == NULL) return;
-  peer_connection_datachannel_send(peer_connection, json, strlen(json));
+  char *buf = strdup(json);
+  if (buf == NULL) return;
+  peer_connection_datachannel_send(peer_connection, buf, strlen(buf));
+  free(buf);
 }
 
 void pipecat_rtvi_note_bot_traffic(void) {

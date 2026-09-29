@@ -35,6 +35,7 @@ extern rtvi_callbacks_t pipecat_rtvi_callbacks;
 extern void pipecat_init_rtvi(PeerConnection *peer_connection, rtvi_callbacks_t *callbacks);
 extern void pipecat_rtvi_send_client_ready();
 extern void pipecat_rtvi_handle_message(const char* msg);
+extern void pipecat_rtvi_send_raw(const char *json);  /* 1.1.0: cmd replies */
 
 // Screen
 extern void pipecat_init_screen();

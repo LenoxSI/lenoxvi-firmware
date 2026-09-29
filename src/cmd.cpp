@@ -16,11 +16,14 @@
 #include <esp_system.h>
 #include <esp_mac.h>
 #include <esp_app_desc.h>
+#include <esp_wifi.h>
+#include <esp_netif.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <string.h>
+#include <stdio.h>
 
 #include "main.h"
-#include "rtvi.h"
 #include "settings.h"
 
 static const char *TAG = "cmd";

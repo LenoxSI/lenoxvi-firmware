@@ -11,6 +11,7 @@
 
 #include "main.h"
 #include "rgb.h"
+#include "cmd.h"
 
 static PeerConnection *peer_connection = NULL;
 
@@ -110,7 +111,6 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
                                   30000, NULL, 7, stack_memory, &task_buffer,
                                   0);
     pipecat_init_rtvi(peer_connection, &pipecat_rtvi_callbacks);
-    extern void cmd_liveness_start(void);
     cmd_liveness_start();  /* 5-min ping liveness (design note zombie fix) */
     // OTA check at CONNECTED (empirical bisect 2026-09-19): the identical
     // version GET crashed deterministically at got-ip (StoreProhibited,
