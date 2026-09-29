@@ -79,6 +79,15 @@ void pipecat_init_wifi() {
 
   ESP_ERROR_CHECK(esp_netif_init());
   esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+  /* Hostname from NVS BEFORE connect — the DHCP DISCOVER carries it,
+   * so the router (UniFi) shows the node name, not the default
+   * "espressif". Rename-time setting is too late for the current
+   * lease (measured 2026-09-29: rename acked, router never updated). */
+  const char *hn = settings_hostname();
+  if (hn && hn[0]) {
+    esp_err_t herr = esp_netif_set_hostname(sta_netif, hn);
+    ESP_LOGI(LOG_TAG, "hostname '%s' set on sta netif (rc=%d)", hn, herr);
+  }
   assert(sta_netif);
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();

@@ -165,6 +165,10 @@ bool pipecat_cmd_handle(const cJSON *msg) {
 
   if (strcmp(cmd, "ping") == 0) {
     cmd_send_simple("ping", true, "pong");
+  } else if (strcmp(cmd, "pong") == 0) {
+    /* Liveness answer from the bot (cmd "probe" above). Activity is
+     * noted by rtvi.cpp's dispatch — deliberately NO reply here:
+     * asymmetry is what makes the loop structurally impossible. */
   } else if (strcmp(cmd, "restart") == 0) {
     cmd_send_simple("restart", true, "rebooting");
     vTaskDelay(pdMS_TO_TICKS(300));  /* let the ack leave the wire */
@@ -186,7 +190,21 @@ bool pipecat_cmd_handle(const cJSON *msg) {
       cmd_send_simple("set_name", false, "missing name");
     } else {
       int rc = nvs_run(0, j_name->valuestring, NULL);
-      cmd_send_simple("set_name", rc == 0, rc == 0 ? "ok" : "nvs error");
+      if (rc == 0) {
+        /* Echo the stored name: the bot's registry relabels the room
+         * from THIS ack (immediately, no reboot needed). Plain "ok"
+         * left the dashboard showing the old label until re-offer
+         * (measured 2026-09-29 19:38). */
+        char reply[160];
+        snprintf(reply, sizeof(reply),
+                 "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\","
+                 "\"cmd\":\"set_name\",\"ok\":true,"
+                 "\"data\":{\"name\":\"%s\"}}",
+                 settings_get_node_name());
+        pipecat_rtvi_send_raw(reply);
+      } else {
+        cmd_send_simple("set_name", false, "nvs error");
+      }
     }
   } else if (strcmp(cmd, "scan") == 0) {
     do_scan();
@@ -231,16 +249,27 @@ static void liveness_task(void *arg) {
       esp_restart();
     }
     s_pong_received = false;
+    /* Probe is cmd "probe" — NOT "ping": the bot answers with
+     * {"cmd":"pong"} and the pong handler never replies. The pair is
+     * deliberately ASYMMETRIC — a reply-to-the-reply loop flooded the
+     * channel at ~1 pong/sec for 12 min (measured 2026-09-29
+     * 19:35–19:47) when probe/pong both used "ping". */
     pipecat_rtvi_send_raw(
-        "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"ping\","
-        "\"ok\":true,\"data\":\"probe\"}");
+        "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"probe\","
+        "\"ok\":true,\"data\":\"liveness\"}");
     /* give the round-trip 90s inside the next 5-min window */
   }
 }
 
 void cmd_liveness_start(void) {
+  static bool started = false;
   static StaticTask_t buf;
   static StackType_t stack[4096 / sizeof(StackType_t)];
+  /* webrtc.cpp calls this on every PeerConnectionState CONNECTED —
+   * spawn exactly one liveness task per boot, ever (the static
+   * buf/stack are single-use; a second spawn would corrupt them). */
+  if (started) return;
+  started = true;
   xTaskCreateStaticPinnedToCore(liveness_task, "liveness",
                                 4096 / sizeof(StackType_t), NULL, 3,
                                 stack, &buf, 0);
