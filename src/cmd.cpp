@@ -20,6 +20,7 @@
 #include <esp_netif.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -41,6 +42,49 @@ void cmd_send_simple(const char *cmd, bool ok, const char *note) {
            "\"ok\":%s,\"data\":\"%s\"}",
            cmd, ok ? "true" : "false", note);
   pipecat_rtvi_send_raw(reply);
+}
+
+/* ── NVS writes must run on an internal-RAM stack ──────────────────
+ * The RTVI task's stack is PSRAM ("RTVI task spawned (PSRAM stack)",
+ * webrtc.cpp). NVS commit suspends the flash cache — a stack access
+ * to PSRAM inside that window double-faults. Measured 2026-09-29
+ * ~19:20: every set_name → "Guru Meditation: Core 0 panic'ed
+ * (Double exception)", A1=0x60100000 (PSRAM SP), backtrace CORRUPTED,
+ * node rebooted before acking. Reads are safe (no cache suspension —
+ * settings_load at boot is fine); WRITES go through this runner: a
+ * short-lived task on a static internal stack. One slot is safe —
+ * the RTVI task serializes commands (same pattern as liveness). */
+typedef struct {
+  int kind;  /* 0 = set_name, 1 = set_wifi */
+  const char *a, *b;
+  int rc;
+} nvs_job_t;
+
+static nvs_job_t s_job;
+static SemaphoreHandle_t s_job_done;
+
+static void nvs_job_task(void *arg) {
+  nvs_job_t *job = (nvs_job_t *)arg;
+  job->rc = job->kind == 0 ? settings_set_node_name(job->a)
+                           : settings_set_wifi(job->a, job->b);
+  xSemaphoreGive(s_job_done);
+  vTaskDelete(NULL);
+}
+
+static int nvs_run(int kind, const char *a, const char *b) {
+  static StaticTask_t buf;
+  static StackType_t stack[6144 / sizeof(StackType_t)];
+  if (s_job_done == NULL) {
+    s_job_done = xSemaphoreCreateBinary();
+    if (s_job_done == NULL) return -100;
+  }
+  s_job.kind = kind; s_job.a = a; s_job.b = b; s_job.rc = -101;
+  TaskHandle_t th = xTaskCreateStaticPinnedToCore(
+      nvs_job_task, "nvs_write", 6144 / sizeof(StackType_t), &s_job,
+      5, stack, &buf, 0);
+  if (th == NULL) return -102;
+  xSemaphoreTake(s_job_done, portMAX_DELAY);
+  return s_job.rc;
 }
 
 /* Pending Wi-Fi change: apply → verify → rollback (design note flow —
@@ -141,7 +185,7 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     if (!cJSON_IsString(j_name)) {
       cmd_send_simple("set_name", false, "missing name");
     } else {
-      int rc = settings_set_node_name(j_name->valuestring);
+      int rc = nvs_run(0, j_name->valuestring, NULL);
       cmd_send_simple("set_name", rc == 0, rc == 0 ? "ok" : "nvs error");
     }
   } else if (strcmp(cmd, "scan") == 0) {
@@ -154,7 +198,7 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     } else {
       strlcpy(s_old_ssid, settings_get_wifi_ssid(), sizeof(s_old_ssid));
       strlcpy(s_old_pass, settings_get_wifi_pass(), sizeof(s_old_pass));
-      int rc = settings_set_wifi(j_ssid->valuestring, j_pass->valuestring);
+      int rc = nvs_run(1, j_ssid->valuestring, j_pass->valuestring);
       if (rc != 0) {
         cmd_send_simple("set_wifi", false, "nvs error");
       } else {
