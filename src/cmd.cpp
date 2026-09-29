@@ -32,9 +32,13 @@ static const char *TAG = "cmd";
  * cmd_result envelope. (Declared in cmd.h; defined before use.) */
 void cmd_send_simple(const char *cmd, bool ok, const char *note) {
   char reply[256];
+  /* "type":"cmd_result" is REQUIRED: pipecat's datachannel parser
+   * does json["type"] on every inbound message and drops the message
+   * on KeyError — measured live 2026-09-29 18:04 ("Error parsing JSON
+   * message …, 'type'"). The LED path uses the same trick. */
   snprintf(reply, sizeof(reply),
-           "{\"evt\":\"cmd_result\",\"cmd\":\"%s\",\"ok\":%s,"
-           "\"data\":\"%s\"}",
+           "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"%s\","
+           "\"ok\":%s,\"data\":\"%s\"}",
            cmd, ok ? "true" : "false", note);
   pipecat_rtvi_send_raw(reply);
 }
@@ -100,8 +104,8 @@ static void do_scan(void) {
   }
   char reply[1600];
   snprintf(reply, sizeof(reply),
-           "{\"evt\":\"cmd_result\",\"cmd\":\"scan\",\"ok\":true,"
-           "\"data\":{%s}}",
+           "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"scan\","
+           "\"ok\":true,\"data\":{%s}}",
            out);
   pipecat_rtvi_send_raw(reply);
   ESP_LOGI(TAG, "scan: replied %d SSIDs", got);
@@ -126,8 +130,8 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char reply[512];
     snprintf(reply, sizeof(reply),
-             "{\"evt\":\"cmd_result\",\"cmd\":\"get_info\",\"ok\":true,"
-             "\"data\":{\"name\":\"%s\",\"mac\":\"%02x%02x%02x%02x%02x%02x\","
+             "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"get_info\","
+             "\"ok\":true,\"data\":{\"name\":\"%s\",\"mac\":\"%02x%02x%02x%02x%02x%02x\","
              "\"fw\":\"%s\"}}",
              settings_get_node_name(), mac[0], mac[1], mac[2], mac[3],
              mac[4], mac[5], esp_app_get_description()->version);
@@ -184,8 +188,8 @@ static void liveness_task(void *arg) {
     }
     s_pong_received = false;
     pipecat_rtvi_send_raw(
-        "{\"evt\":\"cmd_result\",\"cmd\":\"ping\",\"ok\":true,"
-        "\"data\":\"probe\"}");
+        "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"ping\","
+        "\"ok\":true,\"data\":\"probe\"}");
     /* give the round-trip 90s inside the next 5-min window */
   }
 }
