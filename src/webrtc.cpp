@@ -96,12 +96,22 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
     // which must stay contiguous through DTLS cert setup (see main.cpp note).
     pipecat_init_audio_capture();
     pipecat_init_audio_decoder();
+    /* 023 fix (2026-09-29): NULL-check the audio-task stack alloc — a
+     * silent alloc failure meant the audio task never started and the
+     * session streamed silence (zero-audio session, 2026-09-25). */
     StackType_t *stack_memory = (StackType_t *)heap_caps_malloc(
         30000 * sizeof(StackType_t), MALLOC_CAP_SPIRAM);
+    if (stack_memory == NULL) {
+      ESP_LOGE(LOG_TAG, "audio task PSRAM stack alloc failed — rebooting");
+      vTaskDelay(pdMS_TO_TICKS(500));
+      esp_restart();
+    }
     xTaskCreateStaticPinnedToCore(pipecat_send_audio_task, "audio_publisher",
                                   30000, NULL, 7, stack_memory, &task_buffer,
                                   0);
     pipecat_init_rtvi(peer_connection, &pipecat_rtvi_callbacks);
+    extern void cmd_liveness_start(void);
+    cmd_liveness_start();  /* 5-min ping liveness (design note zombie fix) */
     // OTA check at CONNECTED (empirical bisect 2026-09-19): the identical
     // version GET crashed deterministically at got-ip (StoreProhibited,
     // ROM memcpy, TLS setup) but worked perfectly here in build 47 — heap

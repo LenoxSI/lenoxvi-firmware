@@ -8,6 +8,7 @@
 
 #include "main.h"
 #include "rgb.h"
+#include "settings.h"
 
 static bool g_wifi_connected = false;
 static bool g_webrtc_started = false;
@@ -44,18 +45,23 @@ static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
     wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)event_data;
     ESP_LOGW(LOG_TAG, "disconnected reason: %d", d->reason);
     rgb_set_state(RGB_STATE_WIFI_CONNECTING);
-    if (s_retry_num < 5) {
-      esp_wifi_connect();
-      s_retry_num++;
-      ESP_LOGI(LOG_TAG, "retry to connect to the AP");
-    }
-    ESP_LOGI(LOG_TAG, "connect to the AP fail");
+    /* 023 fix (2026-09-29): the old 5-strike counter gave up for the
+     * whole boot after a ~30s body-block — infinite retries with
+     * backoff instead; only a got-ip resets the backoff. */
+    int delay_ms = (s_retry_num < 5) ? 0 : (1 << (s_retry_num - 5)) * 1000;
+    if (delay_ms > 30000) delay_ms = 30000;  // cap at 30s
+    if (delay_ms > 0) vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    esp_wifi_connect();
+    s_retry_num++;
+    ESP_LOGI(LOG_TAG, "retrying connect (attempt %d)", s_retry_num);
+    cmd_wifi_on_disconnected();  // set_wifi verify/rollback hook
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
     ESP_LOGI(LOG_TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
     g_wifi_connected = true;
     s_retry_num = 0;  // reset retry counter on successful connection
     rgb_set_state(RGB_STATE_WIFI_UP);
+    cmd_wifi_on_connected();  // set_wifi verify/rollback hook
     // OTA check does NOT run here (empirical bisect 2026-09-19): the same
     // version GET that works at CONNECTED (build 47: 200 OK, update found)
     // crashes deterministically at got-ip time. It runs from the CONNECTED
@@ -95,12 +101,13 @@ void pipecat_init_wifi() {
     free(aps);
   }
 
-  ESP_LOGI(LOG_TAG, "Connecting to WiFi SSID: %s", WIFI_SSID);
+  ESP_LOGI(LOG_TAG, "Connecting to WiFi SSID: %s",
+           settings_get_wifi_ssid());
   wifi_config_t wifi_config;
   memset(&wifi_config, 0, sizeof(wifi_config));
-  strncpy((char *)wifi_config.sta.ssid, (char *)WIFI_SSID,
+  strncpy((char *)wifi_config.sta.ssid, settings_get_wifi_ssid(),
           sizeof(wifi_config.sta.ssid));
-  strncpy((char *)wifi_config.sta.password, (char *)WIFI_PASSWORD,
+  strncpy((char *)wifi_config.sta.password, settings_get_wifi_pass(),
           sizeof(wifi_config.sta.password));
   /* Force WPA2-PSK — prevents WPA3 SAE path which fails on most APs
    * with ESP-IDF 5.x. PMF capable but not required covers WPA2/WPA3

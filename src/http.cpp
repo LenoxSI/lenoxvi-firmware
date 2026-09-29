@@ -98,10 +98,10 @@ void pipecat_http_request(char *offer, char *answer) {
     ESP_LOGE(LOG_TAG, "Unable to create JSON offer");
     return;
   }
-  /* Room name = the zone routing key (lenoxvi v2 contract). The appliance
-   * uses it for zone-aware behavior (e.g. routing replies to that room's
-   * Sonos); the request handler passes extra fields through untouched. */
-  if (cJSON_AddStringToObject(j_offer, "room", PIPECAT_ROOM) == NULL) {
+  /* Room name = the zone routing key (lenoxvi v2 contract). 1.1.0:
+   * the value is NVS-backed (dashboard-renamable) — the bake is the
+   * fallback only (settings.cpp). */
+  if (cJSON_AddStringToObject(j_offer, "room", settings_get_node_name()) == NULL) {
     ESP_LOGE(LOG_TAG, "Unable to add room to offer");
   }
 

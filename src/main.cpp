@@ -4,6 +4,8 @@
 #include <esp_log.h>
 #include <peer.h>
 
+#include "settings.h"
+
 #ifndef LINUX_BUILD
 #include "nvs_flash.h"
 #include "rgb.h"
@@ -19,6 +21,10 @@ extern "C" void app_main(void) {
 
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   rgb_init();
+  settings_load();  /* NVS name + wifi creds; bakes become fallbacks */
+  /* Hostname follows the node name (UniFi shows it); sta netif exists
+   * after esp_netif_init inside pipecat_init_wifi — set it from the
+   * got-ip path instead (esp_netif_set_hostname on the default sta). */
   /* I2C + XVF probe BEFORE WiFi: the LED ring renders boot/WiFi states
    * through the XMOS, so the bus must exist before those states fire.
    * (Audio/I2S init stays deferred to post-DTLS — heap ordering.) */

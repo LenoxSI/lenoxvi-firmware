@@ -9,6 +9,7 @@
 
 #include "main.h"
 #include "rgb.h"
+#include "cmd.h"
 
 #define MAX_TYPE_LEN 32
 #define MAX_ID_LEN 64
@@ -76,6 +77,12 @@ static char *rtvi_message_to_string(rtvi_msg_t *msg) {
 }
 
 static void rtvi_handle_message(const rtvi_msg_t *msg) {
+  /* Dashboard command schema first (firmware 1.1.0): {"cmd": ...}
+   * envelopes route to cmd.cpp; legacy RTVI "type" messages unchanged. */
+  if (pipecat_cmd_handle(msg->msg)) {
+    cmd_note_activity();  /* any bot traffic = session alive */
+    return;
+  }
   cJSON *j_type = cJSON_GetObjectItem(msg->msg, "type");
   if (j_type == NULL) {
     ESP_LOGE(LOG_TAG, "Unable to find `type` field in RTVI message");
@@ -169,12 +176,26 @@ void pipecat_rtvi_send_client_ready() {
   destroy_rtvi_message(msg);
 }
 
+void pipecat_rtvi_send_raw(const char *json) {
+  /* Raw JSON send for command-schema replies (cmd.cpp) — no label/id
+   * scaffolding; the caller owns the full envelope. */
+  if (peer_connection == NULL) return;
+  peer_connection_datachannel_send(peer_connection, json, strlen(json));
+}
+
+void pipecat_rtvi_note_bot_traffic(void) {
+  /* Called for legacy RTVI messages too — anything from the bot
+   * proves the session is alive (liveness probe, design note). */
+  cmd_note_activity();
+}
+
 void pipecat_rtvi_handle_message(const char *msg) {
   cJSON *j_msg = cJSON_Parse(msg);
   if (j_msg == NULL) {
     ESP_LOGE(LOG_TAG, "Error parsing RTVI message");
     return;
   }
+  pipecat_rtvi_note_bot_traffic();
 
   rtvi_msg_t rtvi_msg = {.msg = j_msg};
 
