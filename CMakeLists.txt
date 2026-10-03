@@ -16,7 +16,7 @@ endif()
 if(DEFINED ENV{PIPECAT_ROOM})
   add_compile_definitions(PIPECAT_ROOM="$ENV{PIPECAT_ROOM}")
 else()
-  add_compile_definitions(PIPECAT_ROOM="bedroom")
+  add_compile_definitions(PIPECAT_ROOM="lenoxvi")
 endif()
 
 if(DEFINED ENV{LOG_DATACHANNEL_MESSAGES})
