@@ -39,6 +39,29 @@ void pipecat_start_webrtc() {
   ESP_LOGI(LOG_TAG, "WebRTC init task spawned");
 }
 
+/* 1.1.1 (2026-10-03): push CURRENT settings (NVS is the truth) into the
+ * WiFi driver's runtime config. Without this, set_wifi's NVS write is
+ * invisible to esp_wifi_connect() — the driver keeps the boot-time
+ * config, re-associates with the OLD password, and the verify step
+ * reports "connected" without ever testing the new creds (measured live
+ * 2026-10-03 12:52: wrong password acked connected in 1.2s, zero
+ * failures, rollback unreachable). Call BEFORE any reconnect that
+ * should use fresh creds — set_wifi apply and the rollback restore. */
+void pipecat_wifi_apply_runtime_config(void) {
+  wifi_config_t wifi_config;
+  memset(&wifi_config, 0, sizeof(wifi_config));
+  strncpy((char *)wifi_config.sta.ssid, settings_get_wifi_ssid(),
+          sizeof(wifi_config.sta.ssid));
+  strncpy((char *)wifi_config.sta.password, settings_get_wifi_pass(),
+          sizeof(wifi_config.sta.password));
+  wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+  wifi_config.sta.pmf_cfg.capable    = true;
+  wifi_config.sta.pmf_cfg.required   = false;
+  esp_err_t err = esp_wifi_set_config(
+      static_cast<wifi_interface_t>(ESP_IF_WIFI_STA), &wifi_config);
+  ESP_LOGW(LOG_TAG, "runtime wifi config push (ssid set, rc=%d)", err);
+}
+
 static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data) {
   static int s_retry_num = 0;  // reset to 0 on IP_EVENT_STA_GOT_IP

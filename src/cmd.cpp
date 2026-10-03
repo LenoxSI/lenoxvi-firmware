@@ -107,6 +107,10 @@ void cmd_wifi_on_disconnected(void) {
   if (++s_wifi_failures >= 3) {
     ESP_LOGW(TAG, "new wifi creds FAILED 3x — rolling back");
     settings_set_wifi(s_old_ssid, s_old_pass);
+    /* 1.1.1: restore the OLD creds into the driver too, or the rollback
+     * has the same stale-config bug in reverse — the NVS restore would
+     * be invisible to the next esp_wifi_connect(). */
+    pipecat_wifi_apply_runtime_config();
     s_wifi_pending = false;
     s_wifi_failures = 0;
     cmd_send_simple("set_wifi", false, "rollback: could not connect");
@@ -223,6 +227,10 @@ bool pipecat_cmd_handle(const cJSON *msg) {
         s_wifi_pending = true;
         s_wifi_failures = 0;
         cmd_send_simple("set_wifi", true, "stored, connecting");
+        /* 1.1.1: push the NEW creds into the driver BEFORE disconnect —
+         * esp_wifi_connect() alone reuses the boot-time config and
+         * "verifies" the old password (measured 2026-10-03). */
+        pipecat_wifi_apply_runtime_config();
         esp_wifi_disconnect();  /* event handler reconnects with new creds */
       }
     }

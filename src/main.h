@@ -7,6 +7,7 @@
 
 // Wifi
 extern void pipecat_init_wifi();
+extern void pipecat_wifi_apply_runtime_config(void);  /* 1.1.1: set_wifi/rollback push NVS creds into the live driver */
 
 // WebRTC / Media
 extern void pipecat_init_audio_capture();
