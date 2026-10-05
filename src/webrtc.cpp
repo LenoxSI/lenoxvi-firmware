@@ -59,6 +59,12 @@ static void dc_create_delayed_task(void *arg) {
                                          (char *)"") != -1) {
     ESP_LOGI(LOG_TAG, "DataChannel created (delayed DCEP)");
     dc_opened = true;  // for the watchdog below
+    /* 1.1.2 connect-push: the running fw version rides the FIRST bytes
+     * on the fresh channel (after this the bot's Nodes FW column knows
+     * what's ACTUALLY running — the manifest only knows what's
+     * available). Sends before the liveness probe window, once per
+     * session open. */
+    cmd_push_firmware_version();
   } else {
     ESP_LOGE(LOG_TAG, "Failed to create DataChannel");
   }

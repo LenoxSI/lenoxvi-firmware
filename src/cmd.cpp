@@ -161,6 +161,24 @@ static void do_scan(void) {
   free(out);
 }
 
+/* ── connect-push: firmware version → bot, once per data-channel open.
+ * (1.1.2) The bot's Nodes table shows each node's ACTUALLY-RUNNING fw
+ * (the OTA manifest can only say what's AVAILABLE). Rides the existing
+ * cmd_result envelope — nothing new invented on the wire. Pushed on the
+ * data-channel-open path so it survives every reconnect + OTA reboot;
+ * the bot needs no request lane and can never ask mid-audio.
+ */
+void cmd_push_firmware_version(void) {
+  const esp_app_desc_t *app_desc = esp_app_get_description();
+  char reply[256];
+  snprintf(reply, sizeof(reply),
+           "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
+           "\"ok\":true,\"data\":{\"fw\":\"%s\"}}",
+           app_desc->version);
+  pipecat_rtvi_send_raw(reply);
+  ESP_LOGI(TAG, "fw_push: sent running version %s", app_desc->version);
+}
+
 bool pipecat_cmd_handle(const cJSON *msg) {
   const cJSON *j_cmd = cJSON_GetObjectItem(msg, "cmd");
   if (j_cmd == NULL || !cJSON_IsString(j_cmd)) return false;

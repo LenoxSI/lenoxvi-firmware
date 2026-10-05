@@ -25,6 +25,10 @@ void cmd_wifi_on_disconnected(void);
 /* Small reply helper used across cmd.cpp. */
 void cmd_send_simple(const char *cmd, bool ok, const char *note);
 
+/* Connect-push: send the running firmware version to the bot, once per
+ * data-channel open (1.1.2 — Nodes table FW column). */
+void cmd_push_firmware_version(void);
+
 #ifdef __cplusplus
 }
 #endif
