@@ -117,7 +117,28 @@ static esp_err_t version_http_event_handler(esp_http_client_event_t *evt) {
 }
 
 // Download and flash firmware using lower-level esp_ota_ops API (plain HTTP)
+
+/* OTA-in-flight flag (2026-10-05): the 09:17–09:22 churn loop — five
+ * reboots to land ONE flash — was the WebRTC DISCONNECTED handler's
+ * esp_restart() firing mid-download: the 1.2MB pull starves the audio
+ * task, the peer drops, and the handler rebooted the node before
+ * esp_ota_write could finish. The OTA task owns the ONLY reboot during
+ * a flash; webrtc.cpp's disconnect handler checks this flag and defers
+ * instead of killing a flash in progress. */
+static volatile bool s_ota_in_flight = false;
+
+bool pipecat_ota_busy(void) { return s_ota_in_flight; }
+
+static esp_err_t download_and_flash_ota_impl(const char *firmware_url);
+
 static esp_err_t download_and_flash_ota(const char *firmware_url) {
+    s_ota_in_flight = true;  // webrtc disconnect handler must NOT reboot now
+    esp_err_t rc = download_and_flash_ota_impl(firmware_url);
+    s_ota_in_flight = false;
+    return rc;
+}
+
+static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
     esp_http_client_config_t config = {};
     config.url = firmware_url;
     config.timeout_ms = 30000;

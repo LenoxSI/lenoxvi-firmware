@@ -47,3 +47,4 @@ extern void pipecat_screen_log(const char *text);
 // OTA firmware update
 extern void pipecat_check_ota_update(void);
 extern void pipecat_ota_mark_valid(void);
+extern bool pipecat_ota_busy(void);

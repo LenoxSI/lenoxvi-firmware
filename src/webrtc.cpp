@@ -91,6 +91,17 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
   if (state == PEER_CONNECTION_DISCONNECTED ||
       state == PEER_CONNECTION_CLOSED) {
     rgb_set_state(RGB_STATE_ERROR);
+    /* OTA flash in flight (2026-10-05): the churn loop — five reboots
+     * to land one 1.2MB flash — was THIS esp_restart() firing mid-
+     * download (the pull starves the audio task, the peer drops, the
+     * handler reboots before esp_ota_write finishes). The OTA task
+     * owns the only reboot during a flash; a dropped session during
+     * a flash is EXPECTED — it re-offers when the OTA task reboots
+     * the node with the new image. */
+    if (pipecat_ota_busy()) {
+      ESP_LOGW(LOG_TAG, "session dropped mid-OTA — not rebooting, flash in flight");
+      return;
+    }
 #ifndef LINUX_BUILD
     vTaskDelay(pdMS_TO_TICKS(3000));
     esp_restart();
@@ -135,13 +146,20 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
             /* Give the TLS stack a moment post-offer: spawning at the
              * CONNECTED instant races the offer POST's session setup and
              * the version GET dies ESP_ERR_HTTP_CONNECT (2026-09-19).
-             * 5s costs nothing — deploys are not latency-sensitive. */
-            vTaskDelay(pdMS_TO_TICKS(5000));
+             * 5s costs nothing — deploys are not latency-sensitive.
+             * Now 60s (2026-10-05): the check runs PAST session setup —
+             * the audio task, WebRTC and the pipeline are all steady,
+             * and a 1.2MB download no longer starves a booting session
+             * (the 09:17 churn loop). If the session still drops mid-
+             * download, pipecat_ota_busy() keeps the disconnect handler
+             * from rebooting the node — the flash finishes, then the
+             * OTA task's own reboot lands the new image. */
+            vTaskDelay(pdMS_TO_TICKS(60000));
             pipecat_check_ota_update();  // reboots itself if it flashes
             vTaskDelete(NULL);
           },
           "ota_check", 6144 / sizeof(StackType_t), NULL, 3, ota_stack, &ota_task_buf, 0);
-      ESP_LOGI(LOG_TAG, "OTA check task spawned (CONNECTED)");
+      ESP_LOGI(LOG_TAG, "OTA check task spawned (CONNECTED, 60s deferred)");
     }
 #endif
   }
