@@ -7,7 +7,7 @@ if(IDF_TARGET STREQUAL linux)
 else()
 	idf_component_register(
 		SRCS ${COMMON_SRC} "wifi.cpp" "media.cpp" "rtvi.cpp" "rtvi_callbacks.cpp" "rgb.c" "ota.cpp" "settings.cpp" "cmd.cpp"
-		REQUIRES driver esp_wifi nvs_flash peer esp_psram esp-libopus esp_http_client json esp_codec_dev led_strip app_update)
+		REQUIRES driver esp_wifi nvs_flash peer esp_psram esp-libopus esp_http_client json app_update)
 endif()
 
 idf_component_get_property(lib peer COMPONENT_LIB)

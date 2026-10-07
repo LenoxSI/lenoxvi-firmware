@@ -1,9 +1,8 @@
 dependencies:
   idf:
     version: ">=4.4"
-  espressif/esp_codec_dev:
-    version: ">=1.0.0"
-  espressif/esp_io_expander_tca95xx_16bit:
-    version: "^2.0.1"
-  espressif/led_strip:
-    version: "^3.0.1"
+    # (2026-10-07) esp_codec_dev / esp_io_expander_tca95xx_16bit / led_strip
+    # removed — Waveshare-era deps (ES7210 codec, TCA95xx expander, WS2812
+    # strip). The XVF3800 port replaced the codec path with raw I2S, the LEDs
+    # ride the XMOS over I2C, and this board has no I/O expander. Nothing in
+    # src/ references any of them.
