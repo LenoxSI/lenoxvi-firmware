@@ -29,7 +29,6 @@ extern "C" void app_main(void) {
    * through the XMOS, so the bus must exist before those states fire.
    * (Audio/I2S init stays deferred to post-DTLS — heap ordering.) */
   pipecat_init_i2c_early();
-  pipecat_init_screen();
   peer_init();
   // OTA validity mark BEFORE WiFi (v1's proven order, restored 2026-09-19):
   // it writes otadata (flash). After got-ip it raced WiFi's connection and
@@ -52,8 +51,6 @@ extern "C" void app_main(void) {
   // WebRTC init is deferred to the first IP_EVENT_STA_GOT_IP (see wifi.cpp) —
   // starting it before the network stack allocates exhausts the heap and
   // kills the DTLS certificate setup.
-
-  pipecat_screen_system_log("Pipecat ESP32 client initialized\n");
 
   while (1) {
     pipecat_webrtc_loop();

@@ -38,12 +38,6 @@ extern void pipecat_rtvi_send_client_ready();
 extern void pipecat_rtvi_handle_message(const char* msg);
 extern void pipecat_rtvi_send_raw(const char *json);  /* 1.1.0: cmd replies */
 
-// Screen
-extern void pipecat_init_screen();
-extern void pipecat_screen_system_log(const char *text);
-extern void pipecat_screen_new_log();
-extern void pipecat_screen_log(const char *text);
-
 // OTA firmware update
 extern void pipecat_check_ota_update(void);
 extern void pipecat_ota_mark_valid(void);

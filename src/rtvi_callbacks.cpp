@@ -12,8 +12,9 @@ static void on_bot_stopped_speaking() {
 }
 
 static void on_bot_tts_text(const char *text) {
-  // pipecat_screen_log(text);
-  // pipecat_screen_log(" ");
+  /* (screen stub removed 2026-10-07 — Waveshare-only artifact; the
+   * reSpeaker/Flex nodes have no display. TTS text is observable via
+   * RTVI on the wire, nothing needed here.) */
 }
 
 static void on_oww_awake() {
