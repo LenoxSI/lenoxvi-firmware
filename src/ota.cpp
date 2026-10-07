@@ -82,12 +82,26 @@ static int compare_versions(const char *local, const char *remote) {
     return 0;
 }
 
+/* OTA track key (design note, 2026-10-07): the bot serves per-model
+ * manifests. The array node (XVF3800 mic-array board, 1.1.x) keeps the
+ * legacy shared manifest URL — the DEPLOYED 1.1.3 fleet requests
+ * /firmware/version and the server serves it; an unset track here
+ * must stay byte-identical to that. The flex node (reSpeaker Flex,
+ * 1.0.x track) builds with -DXVF_OTA_TRACK="flex" and reads
+ * /firmware/flex/version — a bump on one track can NEVER cross-flash
+ * the other. */
+#ifdef XVF_OTA_TRACK
+#define FW_URL_FMT "%.*s/firmware/" XVF_OTA_TRACK "/%s"
+#else
+#define FW_URL_FMT "%.*s/firmware/%s"
+#endif
+
 static void build_firmware_url(char *out, size_t out_len, const char *suffix) {
     const char *base = PIPECAT_SMALLWEBRTC_URL;
     const char *api_off = strstr(base, "/api/offer");
     size_t prefix_len = api_off ? (size_t)(api_off - base) : strlen(base);
     if (prefix_len >= out_len) prefix_len = out_len - 1;
-    snprintf(out, out_len, "%.*s/firmware/%s", (int)prefix_len, base, suffix);
+    snprintf(out, out_len, FW_URL_FMT, (int)prefix_len, base, suffix);
 }
 
 static esp_err_t version_http_event_handler(esp_http_client_event_t *evt) {

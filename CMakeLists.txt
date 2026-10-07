@@ -38,4 +38,4 @@ if(IDF_TARGET STREQUAL linux)
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(node_esp32 VERSION 1.1.3)
+project(node_esp32 VERSION 1.0.0)
