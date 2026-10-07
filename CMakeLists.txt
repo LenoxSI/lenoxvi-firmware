@@ -5,6 +5,15 @@ if(NOT IDF_TARGET STREQUAL linux)
     message(FATAL_ERROR "Env variables WIFI_SSID and WIFI_PASSWORD must be set")
   endif()
 
+  # flex-xvf3800 branch = the flex firmware track, by definition. This
+  # compile definition routes OTA to /firmware/flex/version (per-model
+  # manifests, design note) — the array node's respeaker-xvf3800 branch
+  # deliberately leaves it unset (byte-identical legacy /firmware/version
+  # for the deployed 1.1.3 fleet). Hard-coded, not env-driven: a stale
+  # CMake cache can never silently build flex firmware against the
+  # array's manifest URL.
+  add_compile_definitions(XVF_OTA_TRACK="flex")
+
   add_compile_definitions(WIFI_SSID="$ENV{WIFI_SSID}")
   add_compile_definitions(WIFI_PASSWORD="$ENV{WIFI_PASSWORD}")
 endif()

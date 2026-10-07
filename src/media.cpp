@@ -334,7 +334,12 @@ void pipecat_init_audio_capture() {
      * (Kyzcreig's linear decimator: boxcar LP, keeps formants for STT). */
     i2s_chan_config_t chan_cfg = {};
     chan_cfg.id = I2S_PORT;
-    chan_cfg.role = I2S_ROLE_SLAVE;
+    chan_cfg.role = I2S_ROLE_MASTER;  /* FLEX: XVF3800 I2S images are SLAVE-only
+                                       * (no master image exists — GitHub issue #1); the XIAO
+                                       * becomes the clock source: BCLK+LRCLK+MCLK (12.288MHz,
+                                       * 48k×256) out. Same 8/7/44/43 pins as the array board —
+                                       * Flex XIAO footprint wiring is identical (verified vs
+                                       * Seeed Flex Arduino examples + GitHub issue #2 configs). */
     /* Kyzcreig runs 12x511 (~49KB/channel) — does NOT fit XIAO internal RAM
      * next to WiFi/WebRTC (note-011 trap #7; boot53 pre-I2S DMA heap was
      * 35KB). 6x300 = 37.5ms of RX headroom in ~29KB. */
@@ -364,7 +369,10 @@ void pipecat_init_audio_capture() {
     std_cfg.slot_cfg.left_align = true;
     std_cfg.slot_cfg.big_endian = false;
     std_cfg.slot_cfg.bit_order_lsb = false;
-    std_cfg.gpio_cfg.mclk = GPIO_NUM_NC;   /* master image: XMOS drives itself, no MCLK from us */
+    std_cfg.gpio_cfg.mclk = I2S_MCLK_PIN;   /* FLEX: XIAO drives MCLK — Flex slave
+                                              * image wants external clocks, and the Flex XIAO
+                                              * footprint routes GPIO9 to MCLK (array board
+                                              * master image left this NC). */
     std_cfg.gpio_cfg.bclk = I2S_BCLK_PIN;
     std_cfg.gpio_cfg.ws   = I2S_LRCK_PIN;
     std_cfg.gpio_cfg.dout = I2S_DOUT_PIN;
@@ -379,7 +387,7 @@ void pipecat_init_audio_capture() {
     ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
 
-    ESP_LOGI(LOG_TAG, "Audio ready: XVF3800 I2S MASTER (v1.0.8_48k image), ESP32 slave @ %d Hz", XVF_NATIVE_RATE);
+    ESP_LOGI(LOG_TAG, "Audio ready: FLEX XVF3800 I2S SLAVE (v3.2.1 c48k2ch image), ESP32 MASTER @ %d Hz", XVF_NATIVE_RATE);
 
     /* XVF params are volatile (lost on XMOS power-cycle). NOTE (2026-09-19):
      * with the master image the XMOS drives its own clocks, so the old
