@@ -16,6 +16,13 @@ extern void pipecat_init_audio_decoder();
 extern void pipecat_init_audio_encoder();
 extern void pipecat_send_audio(PeerConnection *peer_connection);
 extern void pipecat_audio_decode(uint8_t *data, size_t size);
+// Software mic mute (flex 1.1.0, 2026-10-07): the Flex board has no
+// physical Mute button (array node's mute is board hardware handled by
+// its stock XMOS image). set_mute from the dashboard zeroes the mic
+// in the same place the turn lock does; toggle via cmd "set_mute".
+extern bool pipecat_mic_muted(void);
+extern bool pipecat_mic_mute_toggle(void);
+extern bool pipecat_mic_mute_set(bool muted);
 
 // WebRTC / Signalling
 extern void pipecat_init_webrtc();

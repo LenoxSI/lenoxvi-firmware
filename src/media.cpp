@@ -70,6 +70,17 @@ static i2s_std_config_t         g_std_cfg;    /* saved for full I2S re-init (hea
 static i2s_chan_config_t        g_chan_cfg;
 static std::atomic<bool>        is_playing = false;
 
+/* Software mic mute (flex 1.1.0, 2026-10-07): the Flex board has no
+ * physical Mute button — the array node's mute is board hardware. The
+ * dashboard's Mute button sends cmd "set_mute"; the zeroing happens in
+ * the exact same place the turn lock (is_playing) zeroes the mic, so
+ * the mute path is one atomic read + memset per frame. */
+static std::atomic<bool>        mic_mute = false;
+
+bool pipecat_mic_muted(void)        { return mic_mute.load(); }
+bool pipecat_mic_mute_set(bool m)   { mic_mute.store(m); return mic_mute.load(); }
+bool pipecat_mic_mute_toggle(void)  { mic_mute.store(!mic_mute.load()); return mic_mute.load(); }
+
 static void update_is_playing(int16_t *buf, size_t n) {
     for (size_t i = 0; i < n; i++) {
         if (buf[i] > 1 || buf[i] < -1) { is_playing = true; return; }
@@ -533,6 +544,11 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
         diag_peak_lo = 0;
     }
     if (is_playing) { memset(mic_mono16, 0, PCM_MONO_BYTES); }
+    /* Software mute (flex 1.1.0): same zeroing as the turn lock — one
+     * atomic read; when muted the encoder sees silence (7-byte DTX
+     * frames on the wire), identical to the node-one hardware-mute
+     * behavior at the DSP level. */
+    if (mic_mute.load()) { memset(mic_mono16, 0, PCM_MONO_BYTES); }
     auto n = opus_encode(opus_encoder, (const opus_int16 *)mic_mono16,
                          PCM_MONO_SAMPLES, encoder_output_buffer, OPUS_BUFFER_SIZE);
     /* Encoder-side diag: what actually leaves the node. If mic peaks are
