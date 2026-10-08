@@ -51,7 +51,14 @@
 #define PCM_MONO_BYTES           (PCM_MONO_SAMPLES * 2)
 #define HW_STEREO32_BYTES        (PCM_MONO_SAMPLES * 2 * 4)
 #define I2S_READ_TIMEOUT_MS      100
-#define XVF_NATIVE_RATE          48000   /* bus rate the XMOS wants (16k bus wedges it: LEDs lock, zero audio) */
+/* FLEX (2026-10-07, final architecture): the formatBCE inthost XMOS image
+ * (application_xvf3800_inthost-lr48-sqr-i2c-v1.0.7) makes the XVF3800 the
+ * I2S clock master — node one's exact proven architecture. The XIAO goes
+ * back to I2S slave (mclk NC): the stock Flex images + XIAO-master is a
+ * dead end (full-scale noise on 48k AND 16k, replicated GitHub issue #2,
+ * S3 can't host these clocks). Bus runs 48k native — extraction identical
+ * to the array board. */
+#define XVF_NATIVE_RATE          48000
 #define HW48_MONO_SAMPLES        960     /* 20ms @ 48k */
 #define HW48_STEREO32_BYTES      (HW48_MONO_SAMPLES * 2 * 4)   /* 7680 B / 20ms */
 
@@ -334,12 +341,10 @@ void pipecat_init_audio_capture() {
      * (Kyzcreig's linear decimator: boxcar LP, keeps formants for STT). */
     i2s_chan_config_t chan_cfg = {};
     chan_cfg.id = I2S_PORT;
-    chan_cfg.role = I2S_ROLE_MASTER;  /* FLEX: XVF3800 I2S images are SLAVE-only
-                                       * (no master image exists — GitHub issue #1); the XIAO
-                                       * becomes the clock source: BCLK+LRCLK+MCLK (12.288MHz,
-                                       * 48k×256) out. Same 8/7/44/43 pins as the array board —
-                                       * Flex XIAO footprint wiring is identical (verified vs
-                                       * Seeed Flex Arduino examples + GitHub issue #2 configs). */
+    chan_cfg.role = I2S_ROLE_SLAVE;  /* inthost image: XMOS is the clock
+                                       * master (node one's architecture); XIAO
+                                       * receives BCLK/LRCLK — the proven
+                                       * slave path that runs bedroom-mic. */
     /* Kyzcreig runs 12x511 (~49KB/channel) — does NOT fit XIAO internal RAM
      * next to WiFi/WebRTC (note-011 trap #7; boot53 pre-I2S DMA heap was
      * 35KB). 6x300 = 37.5ms of RX headroom in ~29KB. */
@@ -357,7 +362,7 @@ void pipecat_init_audio_capture() {
 
     i2s_std_config_t std_cfg = {};
     std_cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(XVF_NATIVE_RATE);
-    std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;   /* 48k x 256 = 12.288MHz */
+    std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;   /* 48k x 256 = 12.288MHz (XMOS self-clocked on inthost) */
     std_cfg.slot_cfg = {};
     std_cfg.slot_cfg.data_bit_width = I2S_DATA_BIT_WIDTH_32BIT;
     std_cfg.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO;
@@ -369,10 +374,7 @@ void pipecat_init_audio_capture() {
     std_cfg.slot_cfg.left_align = true;
     std_cfg.slot_cfg.big_endian = false;
     std_cfg.slot_cfg.bit_order_lsb = false;
-    std_cfg.gpio_cfg.mclk = I2S_MCLK_PIN;   /* FLEX: XIAO drives MCLK — Flex slave
-                                              * image wants external clocks, and the Flex XIAO
-                                              * footprint routes GPIO9 to MCLK (array board
-                                              * master image left this NC). */
+    std_cfg.gpio_cfg.mclk = GPIO_NUM_NC;   /* inthost: XMOS drives itself, no MCLK from us */
     std_cfg.gpio_cfg.bclk = I2S_BCLK_PIN;
     std_cfg.gpio_cfg.ws   = I2S_LRCK_PIN;
     std_cfg.gpio_cfg.dout = I2S_DOUT_PIN;
@@ -387,7 +389,7 @@ void pipecat_init_audio_capture() {
     ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
 
-    ESP_LOGI(LOG_TAG, "Audio ready: FLEX XVF3800 I2S SLAVE (v3.2.1 c48k2ch image), ESP32 MASTER @ %d Hz", XVF_NATIVE_RATE);
+    ESP_LOGI(LOG_TAG, "Audio ready: FLEX XVF3800 I2S MASTER (inthost v1.0.7 image), ESP32 slave @ %d Hz", XVF_NATIVE_RATE);
 
     /* XVF params are volatile (lost on XMOS power-cycle). NOTE (2026-09-19):
      * with the master image the XMOS drives its own clocks, so the old
@@ -397,11 +399,11 @@ void pipecat_init_audio_capture() {
      * revisit echo_onoff=0 etc. only with readback evidence. */
     vTaskDelay(pdMS_TO_TICKS(300));
 #ifndef XVF_APPLY_PROFILE
-#define XVF_APPLY_PROFILE 1   /* ON (2026-09-19): master image's stock gain leaves speech ~-16dB
-                               * vs the old slave image; OWW scores 0.00 on it. Gain-only profile
-                               * (MIC_GAIN 60 + AGC, Seeed v1.0.8 cmd IDs, readback-verified) —
-                               * no routing/AEC writes this time. Old OFF verdict applied to the
-                               * WRONG cmd map + slave image (see design note). */
+#define XVF_APPLY_PROFILE 1   /* ON: inthost image = the array board's v1.0.x
+                               * lineage — the tuned profile (MIC_GAIN 55 +
+                               * AGC, verified cmd IDs) applies. Readbacks
+                               * should answer again on this image; verify
+                               * with the readback lines at boot. */
 #endif
 #if XVF_APPLY_PROFILE
     configure_xvf3800_dsp_profile();
@@ -458,8 +460,9 @@ void pipecat_init_audio_encoder() {
 
 void pipecat_send_audio(PeerConnection *peer_connection) {
     size_t bytes_read = 0;
-    /* 48k bus: 20ms = 960 stereo32 frames (7680B). The 16k image fills one
-     * frame in three; the read path below is phase-independent. */
+    /* 48k bus: 20ms = 960 stereo32 frames (7680B). XMOS-mastered bus —
+     * audio in the HIGH 16 bits of every frame; 6-word boxcar average
+     * per 16k output sample (node one's proven decimator). */
     if (mic_stereo48 == NULL) return;
     esp_err_t rc = i2s_channel_read(rx_chan, mic_stereo48, HW48_STEREO32_BYTES,
                                     &bytes_read, pdMS_TO_TICKS(I2S_READ_TIMEOUT_MS));
@@ -472,12 +475,9 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
         return;
     }
     if (bytes_read < HW48_STEREO32_BYTES) return;  /* partial frame: drop */
-    /* stereo32@48k NATIVE (master image) -> mono16@16k. Audio in the HIGH 16
-     * bits of every frame; linear boxcar decimation over all 6 words per
-     * output sample (Kyzcreig's proven decimator — LP before downsample,
-     * formants survive for STT). lo16 kept in diag only to catch a bit-layout
-     * surprise (note-011 trap #8: layout changes with the image — VERIFY with
-     * the raw dumps, don't assume). */
+    /* stereo32@48k NATIVE (XMOS-mastered inthost image) -> mono16@16k. Audio
+     * in the HIGH 16 bits of every frame; 6-word boxcar decimation (node
+     * one's proven decimator — LP before downsample, formants survive). */
     static int32_t diag_peak_hi = 0;
     static int32_t diag_peak_lo = 0;
     static uint32_t diag_frames = 0;
