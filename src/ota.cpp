@@ -11,8 +11,10 @@
 #include <esp_netif.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <nvs.h>
 
 static const char *OTA_TAG = "ota";
+static bool rollback_retry_allowed(const char *remote);  /* defined below */
 
 /* Wait for the station to have an IP before any HTTP (2026-09-19): the boot
  * check fired ~1s after esp_wifi_start and lost the race — got-ip lands ~1s
@@ -249,6 +251,15 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
 }
 
 void pipecat_check_ota_update(void) {
+    /* a still-unvalidated image never checks for updates — the
+     * write would be refused anyway (esp_ota_begin returns
+     * ROLLBACK_INVALID_STATE while PENDING_VERIFY), and the rollback-retry
+     * guard must not spend a retry on a download that can't happen. The
+     * next boot (validated) checks normally. */
+    if (pipecat_ota_pending_verify()) {
+        ESP_LOGW(OTA_TAG, "skipping OTA check: running image still pending verify");
+        return;
+    }
     /* EMPIRICAL BISECT (2026-09-19): this exact check+download+flash ran
      * fine at CONNECTED in build 47 (version GET 200, 1.0.1->1.0.2,
      * download started). It crashes at got-ip time (StoreProhibited in
@@ -316,6 +327,12 @@ void pipecat_check_ota_update(void) {
 
     ESP_LOGI(OTA_TAG, "Update available: %s -> %s", local_version, remote_version);
 
+    /* never reflash-loop a version the bootloader already rolled
+     * back from (bounded retries, then refuse). */
+    if (!rollback_retry_allowed(remote_version)) {
+        return;
+    }
+
     char firmware_url[256];
     if (strlen(remote_filename) > 0) {
         build_firmware_url(firmware_url, sizeof(firmware_url), remote_filename);
@@ -336,18 +353,140 @@ void pipecat_check_ota_update(void) {
     esp_restart();
 }
 
-void pipecat_ota_mark_valid(void) {
+/* ── OTA health gate + rollback (design note H1, 2026-10-13) ────────
+ *
+ * With CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE the BOOTLOADER boots a fresh
+ * OTA image in ESP_OTA_IMG_PENDING_VERIFY. If that image reboots (crash,
+ * panic loop, watchdog, any esp_restart) before it marks itself valid, the
+ * bootloader rolls back to the previous image — a bad-but-bootable image
+ * no longer needs a USB rescue.
+ *
+ * The old code marked the image valid at BOOT, before WiFi, which made
+ * rollback meaningless (every image validated itself in milliseconds).
+ * Now validity has to be EARNED: the bot must talk back over the data
+ * channel (cmd_note_activity -> pipecat_ota_health_ok). That proves WiFi,
+ * the offer POST, DTLS/SCTP, the DCEP and the RTVI dispatch — the whole
+ * path an image needs to be useful. webrtc.cpp sends one liveness probe
+ * on DC open while pending so a quiet house still produces the pong.
+ *
+ * Landmine (2026-09-19): marking valid after got-ip once double-exception
+ * crash-looped the node — that write ran in the WiFi event handler on the
+ * 2304-byte sys_evt stack (fw review M2). The gate's flash write runs in
+ * its OWN task with a static internal-RAM stack (.bss is internal on this
+ * build), the same shape as the ota_check task whose esp_ota_write path
+ * has flashed with WiFi up since 1.1.3.
+ *
+ * No gate within OTA_HEALTH_TIMEOUT_MS -> explicit rollback + reboot.
+ * Bootloaders WITHOUT rollback (a node not yet USB-flashed) never set
+ * PENDING_VERIFY, so the gate simply never arms: same behavior as before.
+ */
+#define OTA_HEALTH_TIMEOUT_MS   (5 * 60 * 1000)
+/* A rolled-back version gets this many re-attempts before the node refuses
+ * it: a GOOD image can fail the gate for bot-side reasons (bot down or
+ * restarting during the window), so one rollback must not blacklist it
+ * forever — but a truly bad image must not reflash-loop the flash to death
+ * (rollback -> old image OTAs the "newer" version again -> rollback...). */
+#define OTA_ROLLBACK_MAX_RETRIES 2
+#define OTA_NVS_NAMESPACE "tknode"   /* settings.cpp's namespace */
+#define OTA_NVS_KEY_RB_VER "ota_rb_ver"
+#define OTA_NVS_KEY_RB_N   "ota_rb_n"
+
+static volatile bool s_pending_verify = false;
+static TaskHandle_t s_health_task = NULL;
+
+static void ota_health_task(void *arg) {
+    uint32_t ok = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(OTA_HEALTH_TIMEOUT_MS));
+    if (ok) {
+        esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+        if (err == ESP_OK) {
+            s_pending_verify = false;
+            ESP_LOGI(OTA_TAG, "health gate PASSED (bot round-trip) — image marked VALID");
+        } else {
+            /* Stay pending: the next reboot rolls back, which is the safe
+             * direction for an image that can't even write otadata. */
+            ESP_LOGE(OTA_TAG, "health gate passed but mark-valid failed: %s — "
+                     "next reboot rolls back", esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGE(OTA_TAG, "health gate TIMED OUT (%d s, no bot round-trip) — "
+                 "rolling back to the previous image", OTA_HEALTH_TIMEOUT_MS / 1000);
+        vTaskDelay(pdMS_TO_TICKS(200));  /* let the log line leave */
+        esp_ota_mark_app_invalid_rollback_and_reboot();
+        esp_restart();  /* not reached on success; a plain reboot also rolls back */
+    }
+    s_health_task = NULL;
+    vTaskDelete(NULL);
+}
+
+void pipecat_ota_health_begin(void) {
+    /* Boot-time: READ-ONLY (state query + task spawn) — no flash write
+     * here, so the pre-WiFi call site stays exactly as safe as before. */
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t state;
-    if (esp_ota_get_state_partition(running, &state) == ESP_OK) {
-        if (state == ESP_OTA_IMG_PENDING_VERIFY) {
-            ESP_LOGI(OTA_TAG, "Marking current OTA app as valid");
-            esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-            if (err != ESP_OK) {
-                ESP_LOGW(OTA_TAG, "Failed to mark app valid: %s", esp_err_to_name(err));
-            }
-        }
+    if (esp_ota_get_state_partition(running, &state) != ESP_OK ||
+        state != ESP_OTA_IMG_PENDING_VERIFY) {
+        return;  /* validated image, or a bootloader without rollback */
     }
+    s_pending_verify = true;
+    ESP_LOGW(OTA_TAG, "fresh OTA image PENDING_VERIFY — health gate armed (%d s): "
+             "a bot round-trip over the data channel marks it valid; any reboot "
+             "before that rolls back", OTA_HEALTH_TIMEOUT_MS / 1000);
+    static StaticTask_t health_buf;
+    static StackType_t health_stack[4096 / sizeof(StackType_t)];
+    s_health_task = xTaskCreateStaticPinnedToCore(
+        ota_health_task, "ota_health", 4096 / sizeof(StackType_t), NULL, 4,
+        health_stack, &health_buf, 0);
+}
+
+bool pipecat_ota_pending_verify(void) { return s_pending_verify; }
+
+void pipecat_ota_health_ok(void) {
+    TaskHandle_t t = s_health_task;
+    if (s_pending_verify && t != NULL) xTaskNotifyGive(t);
+}
+
+bool pipecat_ota_rejected_version(char *out, size_t out_len) {
+    /* The version the bootloader rolled back FROM, if the other slot holds
+     * one (reported in fw_push so the bot can surface a silent rollback). */
+    const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
+    esp_app_desc_t d;
+    if (bad == NULL || esp_ota_get_partition_description(bad, &d) != ESP_OK) return false;
+    strncpy(out, d.version, out_len - 1);
+    out[out_len - 1] = '\0';
+    return true;
+}
+
+/* true = OK to download `remote`; false = refuse (rolled back too often). */
+static bool rollback_retry_allowed(const char *remote) {
+    char bad_ver[32];
+    if (!pipecat_ota_rejected_version(bad_ver, sizeof(bad_ver)) ||
+        strcmp(bad_ver, remote) != 0) {
+        return true;  /* remote isn't the version that rolled back */
+    }
+    nvs_handle_t h;
+    if (nvs_open(OTA_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(OTA_TAG, "rollback guard: NVS unavailable — refusing %s (fail safe)", remote);
+        return false;
+    }
+    char seen[32] = {0};
+    size_t len = sizeof(seen);
+    uint8_t n = 0;
+    if (nvs_get_str(h, OTA_NVS_KEY_RB_VER, seen, &len) == ESP_OK && strcmp(seen, remote) == 0) {
+        nvs_get_u8(h, OTA_NVS_KEY_RB_N, &n);
+    }
+    bool allowed = n < OTA_ROLLBACK_MAX_RETRIES;
+    if (allowed) {
+        nvs_set_str(h, OTA_NVS_KEY_RB_VER, remote);
+        nvs_set_u8(h, OTA_NVS_KEY_RB_N, (uint8_t)(n + 1));
+        nvs_commit(h);
+        ESP_LOGW(OTA_TAG, "%s was rolled back before — retry %u/%u (the gate can fail "
+                 "for bot-side reasons)", remote, n + 1, OTA_ROLLBACK_MAX_RETRIES);
+    } else {
+        ESP_LOGE(OTA_TAG, "refusing %s: rolled back %u times — ship a NEW version "
+                 "(or USB) to move this node", remote, OTA_ROLLBACK_MAX_RETRIES + 1);
+    }
+    nvs_close(h);
+    return allowed;
 }
 
 #endif // LINUX_BUILD

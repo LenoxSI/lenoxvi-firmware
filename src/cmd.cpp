@@ -171,10 +171,22 @@ static void do_scan(void) {
 void cmd_push_firmware_version(void) {
   const esp_app_desc_t *app_desc = esp_app_get_description();
   char reply[256];
-  snprintf(reply, sizeof(reply),
-           "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
-           "\"ok\":true,\"data\":{\"fw\":\"%s\"}}",
-           app_desc->version);
+  /* if the bootloader rolled back from a version, say which —
+   * "rejected" rides alongside "fw" (the bot ignores unknown keys today;
+   * it's there so a silent rollback can be surfaced). Version strings come
+   * from esp_app_desc (digits + dots), never user input. */
+  char rejected[32];
+  if (pipecat_ota_rejected_version(rejected, sizeof(rejected))) {
+    snprintf(reply, sizeof(reply),
+             "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
+             "\"ok\":true,\"data\":{\"fw\":\"%s\",\"rejected\":\"%s\"}}",
+             app_desc->version, rejected);
+  } else {
+    snprintf(reply, sizeof(reply),
+             "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
+             "\"ok\":true,\"data\":{\"fw\":\"%s\"}}",
+             app_desc->version);
+  }
   pipecat_rtvi_send_raw(reply);
   ESP_LOGI(TAG, "fw_push: sent running version %s", app_desc->version);
 }
@@ -265,7 +277,12 @@ bool pipecat_cmd_handle(const cJSON *msg) {
  * prove itself, then a reboot re-rolls the handshake. */
 static bool s_pong_received = true;
 
-void cmd_note_activity(void) { s_pong_received = true; }
+void cmd_note_activity(void) {
+  s_pong_received = true;
+  /* inbound bot traffic over the data channel = the image works
+   * end to end -> pass the OTA health gate (no-op once validated). */
+  pipecat_ota_health_ok();
+}
 
 static void liveness_task(void *arg) {
   while (1) {
