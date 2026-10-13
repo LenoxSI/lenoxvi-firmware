@@ -65,6 +65,17 @@ static void dc_create_delayed_task(void *arg) {
      * available). Sends before the liveness probe window, once per
      * session open. */
     cmd_push_firmware_version();
+    /* a fresh OTA image earns validity on the first bot
+     * round-trip. The regular liveness probe is 5 min out, and an idle
+     * house may send nothing — so probe once now; the bot's pong passes
+     * the gate (cmd_note_activity). Asymmetric probe/pong as always: the
+     * pong handler never replies. */
+    if (pipecat_ota_pending_verify()) {
+      pipecat_rtvi_send_raw(
+          "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"probe\","
+          "\"ok\":true,\"data\":\"ota_health\"}");
+      ESP_LOGI(LOG_TAG, "OTA health probe sent (image pending verify)");
+    }
   } else {
     ESP_LOGE(LOG_TAG, "Failed to create DataChannel");
   }

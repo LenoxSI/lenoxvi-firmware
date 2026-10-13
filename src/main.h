@@ -47,5 +47,11 @@ extern void pipecat_rtvi_send_raw(const char *json);  /* 1.1.0: cmd replies */
 
 // OTA firmware update
 extern void pipecat_check_ota_update(void);
-extern void pipecat_ota_mark_valid(void);
+// OTA health gate + rollback (design note H1): arm at boot (read-only), pass on
+// the first bot round-trip; rejected = the version the bootloader rolled
+// back from, if any.
+extern void pipecat_ota_health_begin(void);
+extern void pipecat_ota_health_ok(void);
+extern bool pipecat_ota_pending_verify(void);
+extern bool pipecat_ota_rejected_version(char *out, size_t out_len);
 extern bool pipecat_ota_busy(void);

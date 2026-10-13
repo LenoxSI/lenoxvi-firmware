@@ -30,12 +30,16 @@ extern "C" void app_main(void) {
    * (Audio/I2S init stays deferred to post-DTLS — heap ordering.) */
   pipecat_init_i2c_early();
   peer_init();
-  // OTA validity mark BEFORE WiFi (v1's proven order, restored 2026-09-19):
-  // it writes otadata (flash). After got-ip it raced WiFi's connection and
-  // double-exception crash-looped the node (WiFi "kept going out"). Here
-  // the radio is idle and nothing executes from flash during the write.
-  extern void pipecat_ota_mark_valid(void);
-  pipecat_ota_mark_valid();
+  // OTA health gate (design note H1, 2026-10-13). This used to be a
+  // boot-time mark-valid — which made rollback meaningless: every image
+  // validated itself before it ever proved it could reach the bot. Now
+  // this call is READ-ONLY (state query + spawn the gate task); the image
+  // earns validity on the first bot round-trip over the data channel, and
+  // the otadata write happens in the gate's own task with a static
+  // internal-RAM stack. History: the 2026-09-19 double-exception crash
+  // loop came from writing otadata inside the WiFi event handler (tiny
+  // sys_evt stack) — see ota.cpp's gate comment.
+  pipecat_ota_health_begin();
   // NOTE: audio init (I2S DMA buffers) is deferred until AFTER the WebRTC
   // peer connects — see wifi.cpp / webrtc.cpp. I2S's internal-RAM DMA
   // allocations fragment the heap; mbedtls_ssl_cookie_setup needs one large
