@@ -29,6 +29,14 @@ endif()
 
 add_compile_definitions(PIPECAT_SMALLWEBRTC_URL="$ENV{PIPECAT_SMALLWEBRTC_URL}")
 
+# libpeer reserves a STATIC H.264 reassembly buffer (rtp.c nalu_buf,
+# CONFIG_MAX_NALU_SIZE, default 100 KB) in internal .bss — on an audio-only
+# node (video_codec = CODEC_NONE) it can never be used. On the array line
+# it starved internal DMA RAM: hardware AES couldn't allocate its bounce
+# buffer and every TLS-encrypted OTA download died at byte 0 (2026-10-15,
+# array 1.2.6). One packet is plenty; rtp.c drops anything larger.
+add_compile_definitions(CONFIG_MAX_NALU_SIZE=1500)
+
 set(COMPONENTS src)
 set(EXTRA_COMPONENT_DIRS "src" "components/srtp" "components/peer" "components/esp-libopus")
 
@@ -42,4 +50,4 @@ if(IDF_TARGET STREQUAL linux)
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(node_esp32 VERSION 1.2.7)
+project(node_esp32 VERSION 1.2.8)
