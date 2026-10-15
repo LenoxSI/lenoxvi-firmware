@@ -52,10 +52,5 @@ extern void pipecat_check_ota_update(void);
 extern void pipecat_ota_health_begin(void);
 extern void pipecat_ota_health_ok(void);
 extern bool pipecat_ota_pending_verify(void);
-// Gate stopgap (design note): mark CONNECTED reached; weak-pass a pending image
-// before a deliberate reboot so the flaky first handshake can't roll back a
-// good image.
-extern void pipecat_ota_note_connected(void);
-extern void pipecat_ota_settle_before_reboot(const char *why);
 extern bool pipecat_ota_rejected_version(char *out, size_t out_len);
 extern bool pipecat_ota_busy(void);
