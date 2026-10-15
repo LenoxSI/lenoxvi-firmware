@@ -45,6 +45,15 @@ static void pipecat_ondatachannel_onmessage_task(char *msg, size_t len,
 static bool dc_opened = false;
 static TickType_t connected_at = 0;
 
+/* CONNECT watchdog (design note H3, 2026-10-14): the DC watchdog above only
+ * arms AT CONNECTED — a session that never gets there (offer lost, ICE
+ * stuck in CHECKING, or NEW forever) had NO timer and the node sat dark
+ * until a power-cycle. Armed when the offer is created; a healthy connect
+ * lands ~1 s after the offer (measured: offer 5.7 s → connected 6.6 s
+ * after boot), so 30 s is generous for a slow-but-legit ICE. */
+#define CONNECT_TIMEOUT_MS 30000
+static TickType_t offer_created_at = 0;
+
 /* DCEP must NOT be fired from the SCTP onopen callback: libpeer's raw SCTP
  * path sends the DCEP exactly once with NO retransmit, and the remote
  * (aiortc) side of the association isn't always ready to accept it the
@@ -86,6 +95,17 @@ static void pipecat_ondatachannel_onopen_task(void *userdata) {
   xTaskCreate(dc_create_delayed_task, "dc_create", 3072, NULL, 5, NULL);
 }
 
+static void check_connect_watchdog(void) {
+  if (offer_created_at == 0 || connected_at != 0) return;
+  if (xTaskGetTickCount() - offer_created_at > pdMS_TO_TICKS(CONNECT_TIMEOUT_MS)) {
+    ESP_LOGE(LOG_TAG, "never reached CONNECTED %d s after the offer (stuck in "
+             "NEW/CHECKING) — reboot re-roll", CONNECT_TIMEOUT_MS / 1000);
+#ifndef LINUX_BUILD
+    esp_restart();
+#endif
+  }
+}
+
 static void check_dc_watchdog(void) {
   if (connected_at == 0 || dc_opened) return;
   if (xTaskGetTickCount() - connected_at > pdMS_TO_TICKS(20000)) {
@@ -99,7 +119,10 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
   ESP_LOGI(LOG_TAG, "PeerConnectionState: %s",
            peer_connection_state_to_string(state));
 
+  /* FAILED was silently ignored here — a session that ICE
+   * declared dead just sat. Same re-roll as a drop. */
   if (state == PEER_CONNECTION_DISCONNECTED ||
+      state == PEER_CONNECTION_FAILED ||
       state == PEER_CONNECTION_CLOSED) {
     rgb_set_state(RGB_STATE_ERROR);
     /* OTA flash in flight (2026-10-05): the churn loop — five reboots
@@ -219,10 +242,13 @@ void pipecat_init_webrtc() {
                                 pipecat_ondatachannel_onmessage_task,
                                 pipecat_ondatachannel_onopen_task, NULL);
 
+  offer_created_at = xTaskGetTickCount();  /* arm the connect watchdog */
+  if (offer_created_at == 0) offer_created_at = 1;  /* 0 = "not armed" */
   peer_connection_create_offer(peer_connection);
 }
 
 void pipecat_webrtc_loop() {
   peer_connection_loop(peer_connection);
+  check_connect_watchdog();
   check_dc_watchdog();
 }

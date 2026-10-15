@@ -1,0 +1,138 @@
+# lenoxvi libpeer patch 0002 (design note H2, 2026-10-14): one recursive lock
+# serializing sctp->buf / tsn / stream sequences / the mbedtls SSL context
+# across the loop task (DTLS read + SCTP incoming) and app-task senders.
+diff --git a/src/peer_connection.c b/src/peer_connection.c
+index 91136de..b827b5c 100644
+--- a/src/peer_connection.c
++++ b/src/peer_connection.c
+@@ -327,12 +327,17 @@ int peer_connection_loop(PeerConnection* pc) {
+           peer_connection_incoming_rtcp(pc, pc->agent_buf, pc->agent_ret);
+ 
+         } else if (dtls_srtp_probe(pc->agent_buf)) {
++          /* lenoxvi H2: the mbedtls read and the SCTP handling are one
++           * critical section — app tasks write the same SSL context and
++           * sctp->buf from sctp_outgoing_data (see sctp_lock in sctp.h). */
++          sctp_lock();
+           int ret = dtls_srtp_read(&pc->dtls_srtp, pc->temp_buf, sizeof(pc->temp_buf));
+           LOGD("Got DTLS data %d", ret);
+ 
+           if (ret > 0) {
+             sctp_incoming_data(&pc->sctp, (char*)pc->temp_buf, ret);
+           }
++          sctp_unlock();
+ 
+         } else if (rtp_packet_validate(pc->agent_buf, pc->agent_ret)) {
+           LOGD("Got RTP packet");
+diff --git a/src/sctp.c b/src/sctp.c
+index 3cb722d..1e0bf52 100644
+--- a/src/sctp.c
++++ b/src/sctp.c
+@@ -74,6 +74,30 @@ static const uint32_t crc32c_table[256] = {
+     0x79B737BAL, 0x8BDCB4B9L, 0x988C474DL, 0x6AE7C44EL,
+     0xBE2DA0A5L, 0x4C4623A6L, 0x5F16D052L, 0xAD7D5351L};
+ 
++/* lenoxvi H2 (2026-10-14) — see sctp.h. */
++#if defined(ESP_PLATFORM)
++#include <freertos/FreeRTOS.h>
++#include <freertos/semphr.h>
++static StaticSemaphore_t s_sctp_lock_buf;
++static SemaphoreHandle_t s_sctp_lock = NULL;
++static portMUX_TYPE s_sctp_lock_init_mux = portMUX_INITIALIZER_UNLOCKED;
++void sctp_lock(void) {
++  if (s_sctp_lock == NULL) {  /* first use: create exactly once */
++    taskENTER_CRITICAL(&s_sctp_lock_init_mux);
++    if (s_sctp_lock == NULL) {
++      s_sctp_lock = xSemaphoreCreateRecursiveMutexStatic(&s_sctp_lock_buf);
++    }
++    taskEXIT_CRITICAL(&s_sctp_lock_init_mux);
++  }
++  xSemaphoreTakeRecursive(s_sctp_lock, portMAX_DELAY);
++}
++void sctp_unlock(void) { xSemaphoreGiveRecursive(s_sctp_lock); }
++#else
++/* Non-ESP builds (Linux examples): unchanged upstream behavior. */
++void sctp_lock(void) {}
++void sctp_unlock(void) {}
++#endif
++
+ uint32_t crc32c(uint32_t crc, const uint8_t* data, unsigned int length) {
+   while (length--) {
+     crc = crc32c_table[(crc ^ *data++) & 0xFFL] ^ (crc >> 8);
+@@ -116,7 +140,7 @@ static int sctp_next_stream_sequence(Sctp* sctp, uint16_t sid, uint16_t* sequenc
+ }
+ #endif
+ 
+-int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid) {
++static int sctp_outgoing_data_impl(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid) {
+ #if CONFIG_USE_USRSCTP
+   int res;
+   struct sctp_sendv_spa spa = {0};
+@@ -240,7 +264,7 @@ void sctp_handle_sctp_packet(Sctp* sctp, char* buf, size_t len) {
+     sctp_parse_data_channel_open(sctp, sid, buf + 28, len - 28);
+ }
+ 
+-void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
++static void sctp_incoming_data_impl(Sctp* sctp, char* buf, size_t len) {
+   if (!sctp || !buf)
+     return;
+ 
+@@ -574,7 +598,7 @@ void sctp_usrsctp_deinit() {
+ #endif
+ }
+ 
+-int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
++static int sctp_create_association_impl(Sctp* sctp, DtlsSrtp* dtls_srtp) {
+   sctp->dtls_srtp = dtls_srtp;
+   sctp->local_port = 5000;
+   sctp->remote_port = 5000;
+@@ -706,6 +730,28 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
+   return 0;
+ }
+ 
++/* lenoxvi H2 wrappers: public entry points take the lock around the
++ * unchanged upstream bodies (no early-return unlock bookkeeping). */
++int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid) {
++  sctp_lock();
++  int ret = sctp_outgoing_data_impl(sctp, buf, len, ppid, sid);
++  sctp_unlock();
++  return ret;
++}
++
++void sctp_incoming_data(Sctp* sctp, char* buf, size_t len) {
++  sctp_lock();
++  sctp_incoming_data_impl(sctp, buf, len);
++  sctp_unlock();
++}
++
++int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
++  sctp_lock();
++  int ret = sctp_create_association_impl(sctp, dtls_srtp);
++  sctp_unlock();
++  return ret;
++}
++
+ void sctp_destroy_association(Sctp* sctp) {
+ #if CONFIG_USE_USRSCTP
+   if (sctp && sctp->sock) {
+diff --git a/src/sctp.h b/src/sctp.h
+index aa6c958..2bc0a72 100644
+--- a/src/sctp.h
++++ b/src/sctp.h
+@@ -185,6 +185,17 @@ void sctp_usrsctp_deinit();
+ 
+ int sctp_is_connected(Sctp* sctp);
+ 
++/* lenoxvi H2 (2026-10-14): ONE recursive lock serializing every touch of
++ * the shared SCTP/DTLS state — sctp->buf (outgoing build AND incoming
++ * SACK/response build share it; incoming memsets it), sctp->tsn, the
++ * outgoing stream sequences, and the mbedtls SSL context (read in the
++ * loop task, written from any app task; mbedtls contexts are NOT thread
++ * safe). Recursive: the incoming path re-enters sctp_outgoing_data for
++ * the DCEP ACK. Module-level (not in Sctp): PeerConnection memsets its
++ * Sctp, which would wipe a handle stored there. */
++void sctp_lock(void);
++void sctp_unlock(void);
++
+ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len);
+ 
+ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid);
