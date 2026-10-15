@@ -8,6 +8,7 @@
 #include <esp_http_client.h>
 #include <esp_app_format.h>
 #include <esp_ota_ops.h>
+#include <esp_heap_caps.h>
 #include <esp_netif.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -190,6 +191,12 @@ static esp_err_t download_and_flash_ota(const char *firmware_url) {
 }
 
 static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
+    /* The TLS read path needs internal DMA-capable RAM (hardware AES bounce
+     * buffer). Log it on every attempt so a RAM squeeze shows up as numbers,
+     * not as "esp-aes: Failed to allocate memory" (2026-10-15). */
+    ESP_LOGI(OTA_TAG, "internal DMA RAM: %u free, largest block %u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
     esp_http_client_config_t config = {};
     config.url = firmware_url;
     config.timeout_ms = 30000;
