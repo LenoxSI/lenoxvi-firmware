@@ -28,7 +28,11 @@ else()
   add_compile_definitions(PIPECAT_ROOM="lenoxvi")
 endif()
 
-if(DEFINED ENV{LOG_DATACHANNEL_MESSAGES})
+# Debug-only: logs EVERY data-channel message to serial — including set_wifi
+# payloads (the WiFi password). Explicit opt-in by VALUE (=1): the old
+# `if(DEFINED ENV{...})` was true for set-but-EMPTY, and deploy_firmware.sh
+# exported it empty, so every script build shipped with it on (2026-10-13).
+if("$ENV{LOG_DATACHANNEL_MESSAGES}" STREQUAL "1")
   add_compile_definitions(LOG_DATACHANNEL_MESSAGES="1")
 endif()
 
@@ -47,4 +51,4 @@ if(IDF_TARGET STREQUAL linux)
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(node_esp32 VERSION 1.2.6)
+project(node_esp32 VERSION 1.2.7)
