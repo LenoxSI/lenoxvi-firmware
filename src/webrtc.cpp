@@ -134,6 +134,7 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
      * the node with the new image. */
     if (pipecat_ota_busy()) {
       ESP_LOGW(LOG_TAG, "session dropped mid-OTA — not rebooting, flash in flight");
+      pipecat_ota_defer_drop();  /* a FAILED flash reboots instead (ota.cpp) */
       return;
     }
 #ifndef LINUX_BUILD

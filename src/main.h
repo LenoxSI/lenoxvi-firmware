@@ -54,3 +54,4 @@ extern void pipecat_ota_health_ok(void);
 extern bool pipecat_ota_pending_verify(void);
 extern bool pipecat_ota_rejected_version(char *out, size_t out_len);
 extern bool pipecat_ota_busy(void);
+extern void pipecat_ota_defer_drop(void);

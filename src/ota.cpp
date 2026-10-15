@@ -128,15 +128,50 @@ static esp_err_t version_http_event_handler(esp_http_client_event_t *evt) {
  * a flash; webrtc.cpp's disconnect handler checks this flag and defers
  * instead of killing a flash in progress. */
 static volatile bool s_ota_in_flight = false;
+/* Set by webrtc.cpp when it SKIPPED a reboot because a flash was in flight.
+ * If the flash then fails, nobody else will ever reboot the node — the
+ * session is gone and the one-per-boot OTA check is spent — so the OTA
+ * path owns that reboot (2026-10-15). */
+static volatile bool s_drop_deferred = false;
 
 bool pipecat_ota_busy(void) { return s_ota_in_flight; }
+void pipecat_ota_defer_drop(void) { s_drop_deferred = true; }
 
 static esp_err_t download_and_flash_ota_impl(const char *firmware_url);
 
+/* Download retry (2026-10-15): the check runs ONCE per boot, so one
+ * transient failure (WiFi blip, bot restarting, a truncated read) used to
+ * leave the node on the old image until its next reboot. Each attempt is
+ * self-contained (esp_ota_abort releases the partition), so a retry is a
+ * clean restart of the download. */
+#define OTA_DOWNLOAD_ATTEMPTS 3
+static const uint32_t k_ota_retry_delay_ms[OTA_DOWNLOAD_ATTEMPTS - 1] = {10000, 30000};
+
 static esp_err_t download_and_flash_ota(const char *firmware_url) {
     s_ota_in_flight = true;  // webrtc disconnect handler must NOT reboot now
-    esp_err_t rc = download_and_flash_ota_impl(firmware_url);
+    esp_err_t rc = ESP_FAIL;
+    for (int attempt = 1; attempt <= OTA_DOWNLOAD_ATTEMPTS; attempt++) {
+        rc = download_and_flash_ota_impl(firmware_url);
+        if (rc == ESP_OK) break;
+        if (attempt < OTA_DOWNLOAD_ATTEMPTS) {
+            uint32_t delay_ms = k_ota_retry_delay_ms[attempt - 1];
+            ESP_LOGW(OTA_TAG, "OTA attempt %d/%d failed (%s) — retrying in %lu s",
+                     attempt, OTA_DOWNLOAD_ATTEMPTS, esp_err_to_name(rc),
+                     (unsigned long)(delay_ms / 1000));
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+    }
     s_ota_in_flight = false;
+    if (rc != ESP_OK) {
+        ESP_LOGE(OTA_TAG, "OTA gave up after %d attempts (%s) — staying on the "
+                 "running image", OTA_DOWNLOAD_ATTEMPTS, esp_err_to_name(rc));
+        if (s_drop_deferred) {
+            ESP_LOGE(OTA_TAG, "the session dropped during the OTA and its reboot "
+                     "was deferred — rebooting now to reconnect");
+            vTaskDelay(pdMS_TO_TICKS(500));  /* let the log line leave */
+            esp_restart();
+        }
+    }
     return rc;
 }
 
@@ -164,6 +199,15 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
     }
 
     int content_length = esp_http_client_fetch_headers(client);
+    int status = esp_http_client_get_status_code(client);
+    if (status != 200) {
+        /* A 404/500 body used to be streamed into the OTA partition until
+         * esp_ota_write rejected the magic byte — fail cleanly instead. */
+        ESP_LOGE(OTA_TAG, "Firmware download HTTP %d — not flashing", status);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_FAIL;
+    }
     if (content_length <= 0) {
         ESP_LOGE(OTA_TAG, "No content-length header");
         esp_http_client_close(client);
