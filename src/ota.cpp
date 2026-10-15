@@ -407,14 +407,37 @@ void pipecat_check_ota_update(void) {
 
 static volatile bool s_pending_verify = false;
 static TaskHandle_t s_health_task = NULL;
+/* Gate stopgap (design note finding 1, 2026-10-14): the FIRST data-channel
+ * handshake fails ~60% of boots (bot never sees the DCEP open — a separate
+ * root cause, under investigation). Strict gate = a GOOD image whose first
+ * boot draws that failure is rolled back (≈1 in 5 good releases refused
+ * after the retry guard). Weak proof: reaching PEER CONNECTED already
+ * required WiFi + the offer POST to the bot + ICE + DTLS with the bot — an
+ * image that gets that far can talk to the bot. So a pending image that
+ * reached CONNECTED is marked valid (WEAK pass) instead of rolled back when
+ * the DC watchdog / a session drop reboots it, or when the 5-min gate
+ * times out. Still rolls back: crash/reboot before CONNECTED, never
+ * connecting, a panic anywhere before a pass. Remove once the handshake
+ * root cause is fixed and the strict gate is affordable again. */
+static volatile bool s_reached_connected = false;
+static volatile bool s_weak_pass = false;
 
 static void ota_health_task(void *arg) {
     uint32_t ok = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(OTA_HEALTH_TIMEOUT_MS));
+    if (!ok && s_reached_connected) {
+        ESP_LOGW(OTA_TAG, "health gate: no bot round-trip in %d s, but the image "
+                 "reached CONNECTED — WEAK pass (stopgap, design note)",
+                 OTA_HEALTH_TIMEOUT_MS / 1000);
+        s_weak_pass = true;
+        ok = 1;
+    }
     if (ok) {
         esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
         if (err == ESP_OK) {
             s_pending_verify = false;
-            ESP_LOGI(OTA_TAG, "health gate PASSED (bot round-trip) — image marked VALID");
+            ESP_LOGI(OTA_TAG, "health gate PASSED (%s) — image marked VALID",
+                     s_weak_pass ? "WEAK: reached CONNECTED, no DC round-trip"
+                                 : "bot round-trip");
         } else {
             /* Stay pending: the next reboot rolls back, which is the safe
              * direction for an image that can't even write otadata. */
@@ -453,6 +476,26 @@ void pipecat_ota_health_begin(void) {
 }
 
 bool pipecat_ota_pending_verify(void) { return s_pending_verify; }
+
+void pipecat_ota_note_connected(void) { s_reached_connected = true; }
+
+void pipecat_ota_settle_before_reboot(const char *why) {
+    /* Called right before a DELIBERATE reboot (DC watchdog, session drop).
+     * Pending + reached CONNECTED -> weak-pass via the gate task (the
+     * otadata write stays on its own static stack, never the caller's),
+     * wait briefly for it, then let the caller reboot into a VALID image.
+     * Anything else: no-op — the reboot rolls back as designed. */
+    TaskHandle_t t = s_health_task;
+    if (!s_pending_verify || !s_reached_connected || t == NULL) return;
+    ESP_LOGW(OTA_TAG, "pending image about to reboot (%s) after reaching "
+             "CONNECTED — weak-pass first so it is not rolled back", why);
+    s_weak_pass = true;
+    xTaskNotifyGive(t);
+    for (int i = 0; i < 30 && s_pending_verify; i++) vTaskDelay(pdMS_TO_TICKS(100));
+    if (s_pending_verify) {
+        ESP_LOGE(OTA_TAG, "weak-pass did not complete in 3 s — reboot will roll back");
+    }
+}
 
 void pipecat_ota_health_ok(void) {
     TaskHandle_t t = s_health_task;
