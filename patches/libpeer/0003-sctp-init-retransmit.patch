@@ -1,0 +1,156 @@
+# lenoxvi libpeer patch 0003 (2026-10-14): SCTP INIT retransmit (RFC 4960
+# T1-init) — the lone upstream INIT is dropped by aiortc on ~60% of sessions
+# (passive SCTP side + drops app data before its SCTP receiver registers).
+diff --git a/src/peer_connection.c b/src/peer_connection.c
+--- a/src/peer_connection.c
++++ b/src/peer_connection.c
+@@ -318,6 +318,10 @@
+       }
+       break;
+     case PEER_CONNECTION_CONNECTED:
++      /* lenoxvi 0003: resend SCTP INIT until the association forms */
++      if (pc->config.datachannel) {
++        sctp_tick(&pc->sctp);
++      }
+       if ((pc->agent_ret = agent_recv(&pc->agent, pc->agent_buf, sizeof(pc->agent_buf))) > 0) {
+         LOGD("agent_recv %d", pc->agent_ret);
+ 
+diff --git a/src/sctp.c b/src/sctp.c
+--- a/src/sctp.c
++++ b/src/sctp.c
+@@ -3,6 +3,7 @@
+ 
+ #include "dtls_srtp.h"
+ #include "sctp.h"
++#include "ports.h"
+ #include "utils.h"
+ #if CONFIG_USE_USRSCTP
+ #include <usrsctp.h>
+@@ -598,6 +599,35 @@
+ #endif
+ }
+ 
++#if !CONFIG_USE_USRSCTP
++/* lenoxvi 0003: the upstream INIT build, byte-identical, callable again.
++ * Caller holds sctp_lock (create_association / sctp_tick). */
++static void sctp_send_init(Sctp* sctp) {
++  int length = 0;
++  SctpInitChunk* init_chunk;
++  SctpHeader* header;
++  SctpPacket* out_packet = (SctpPacket*)sctp->buf;
++  header = &out_packet->header;
++  init_chunk = (SctpInitChunk*)out_packet->chunks;
++
++  header->source_port = htons(sctp->local_port);
++  header->destination_port = htons(sctp->remote_port);
++  header->verification_tag = 0x0;
++  init_chunk->common.type = SCTP_INIT;
++  init_chunk->common.flags = 0x00;
++  init_chunk->common.length = htons(20);
++  init_chunk->initiate_tag = htonl(0x12345678);
++  init_chunk->a_rwnd = htonl(0x100000);
++  init_chunk->number_of_outbound_streams = 0xffff;
++  init_chunk->number_of_inbound_streams = 0xffff;
++  init_chunk->initial_tsn = htonl(sctp->tsn);
++  length = ntohs(init_chunk->common.length) + sizeof(SctpHeader);
++  length = (4 * ((length + 3) / 4));
++  header->checksum = sctp_get_checksum(sctp, sctp->buf, length);
++  dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length);
++}
++#endif
++
+ static int sctp_create_association_impl(Sctp* sctp, DtlsSrtp* dtls_srtp) {
+   sctp->dtls_srtp = dtls_srtp;
+   sctp->local_port = 5000;
+@@ -702,29 +732,10 @@
+ 
+   sctp->sock = sock;
+ #else
+-  // send SCTP_INIT
+-  int length = 0;
+-  SctpInitChunk* init_chunk;
+-  SctpHeader* header;
+-  SctpPacket* out_packet = (SctpPacket*)sctp->buf;
+-  header = &out_packet->header;
+-  init_chunk = (SctpInitChunk*)out_packet->chunks;
+-
+-  header->source_port = htons(sctp->local_port);
+-  header->destination_port = htons(sctp->remote_port);
+-  header->verification_tag = 0x0;
+-  init_chunk->common.type = SCTP_INIT;
+-  init_chunk->common.flags = 0x00;
+-  init_chunk->common.length = htons(20);
+-  init_chunk->initiate_tag = htonl(0x12345678);
+-  init_chunk->a_rwnd = htonl(0x100000);
+-  init_chunk->number_of_outbound_streams = 0xffff;
+-  init_chunk->number_of_inbound_streams = 0xffff;
+-  init_chunk->initial_tsn = htonl(sctp->tsn);
+-  length = ntohs(init_chunk->common.length) + sizeof(SctpHeader);
+-  length = (4 * ((length + 3) / 4));
+-  header->checksum = sctp_get_checksum(sctp, sctp->buf, length);
+-  dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length);
++  // send SCTP_INIT (lenoxvi 0003: factored out so sctp_tick can resend it)
++  sctp_send_init(sctp);
++  sctp->init_tries = 1;
++  sctp->init_sent_ms = ports_get_epoch_time();
+ #endif
+ 
+   return 0;
+@@ -752,6 +763,27 @@
+   return ret;
+ }
+ 
++#define SCTP_INIT_RTO_MS 500
++#define SCTP_INIT_MAX_TRIES 20  /* 10 s — inside the node's 20 s DC watchdog */
++void sctp_tick(Sctp* sctp) {
++#if !CONFIG_USE_USRSCTP
++  if (sctp->connected || sctp->init_tries <= 0 || sctp->init_tries >= SCTP_INIT_MAX_TRIES) {
++    return;
++  }
++  sctp_lock();
++  if (!sctp->connected && sctp->init_tries > 0 && sctp->init_tries < SCTP_INIT_MAX_TRIES &&
++      (uint32_t)(ports_get_epoch_time() - sctp->init_sent_ms) >= SCTP_INIT_RTO_MS) {
++    LOGI("SCTP INIT retransmit #%d (no association yet)", sctp->init_tries);
++    sctp_send_init(sctp);
++    sctp->init_tries++;
++    sctp->init_sent_ms = ports_get_epoch_time();
++  }
++  sctp_unlock();
++#else
++  (void)sctp;
++#endif
++}
++
+ void sctp_destroy_association(Sctp* sctp) {
+ #if CONFIG_USE_USRSCTP
+   if (sctp && sctp->sock) {
+diff --git a/src/sctp.h b/src/sctp.h
+--- a/src/sctp.h
++++ b/src/sctp.h
+@@ -172,6 +172,9 @@
+   void (*onclose)(void* userdata);
+ 
+   void* userdata;
++  /* lenoxvi 0003: SCTP INIT retransmit (RFC 4960 T1-init) state */
++  uint32_t init_sent_ms;
++  int init_tries;
+   uint8_t buf[CONFIG_MTU];
+ } Sctp;
+ 
+@@ -196,6 +199,16 @@
+ void sctp_lock(void);
+ void sctp_unlock(void);
+ 
++/* lenoxvi 0003 (2026-10-14): resend SCTP INIT until the association forms.
++ * Upstream raw SCTP sent exactly ONE INIT the instant DTLS completed, with
++ * no T1-init timer. Against aiortc (which is the PASSIVE SCTP side when we
++ * are ICE-controlling, and silently drops app data that lands before its
++ * SCTP transport registers — rtcdtlstransport.py `if self._data_receiver`)
++ * that lone INIT is lost on ~60% of sessions and the association never
++ * forms (bot: "Data channel not established within 10s"). Call every loop
++ * pass while CONNECTED; cheap no-op once connected. */
++void sctp_tick(Sctp* sctp);
++
+ void sctp_incoming_data(Sctp* sctp, char* buf, size_t len);
+ 
+ int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid);
