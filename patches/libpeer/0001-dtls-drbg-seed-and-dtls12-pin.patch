@@ -1,0 +1,65 @@
+# lenoxvi libpeer patch 0001 (2026-09-15 / 2026-09-19): mbedtls 3.x DRBG seed at
+# init (else DTLS init dies, -0x0020) + pin DTLS to 1.2 both roles (else the
+# SCTP association/DCEP never completes once TLS 1.3 is enabled for OTA).
+# Was an UNTRACKED edit in deps/libpeer until 2026-10-14.
+diff --git a/src/dtls_srtp.c b/src/dtls_srtp.c
+index 8f2ed91..963c4c1 100644
+--- a/src/dtls_srtp.c
++++ b/src/dtls_srtp.c
+@@ -339,6 +339,26 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
+   mbedtls_ctr_drbg_init(&dtls_srtp->ctr_drbg);
+   dtls_srtp->initialized = 1;
+ 
++#if MBEDTLS_VERSION_NUMBER < 0x04000000
++  /* mbedtls 3.x (IDF 5.3): seed the DRBG NOW — mbedtls_ssl_cookie_setup
++   * generates its cookie key via the RNG immediately, and upstream main
++   * only seeds inside cert creation (which runs LATER). Unseeded DRBG =
++   * cookie_setup fails with -0x0020 (AES invalid key length) and the whole
++   * DTLS init dies. Found on the reSpeaker node bring-up, 2026-09-15. */
++  {
++    const char *pers = "dtls_srtp";
++    int seed_ret = mbedtls_ctr_drbg_seed(&dtls_srtp->ctr_drbg,
++                                          mbedtls_entropy_func,
++                                          &dtls_srtp->entropy,
++                                          (const unsigned char *)pers,
++                                          strlen(pers));
++    if (seed_ret != 0) {
++      LOGE("mbedtls_ctr_drbg_seed (init) failed -0x%.4x", (unsigned int)-seed_ret);
++      return -1;
++    }
++  }
++#endif
++
+ #if MBEDTLS_VERSION_NUMBER >= 0x04000000
+   if (psa_crypto_init() != PSA_SUCCESS) {
+     LOGE("psa_crypto_init failed");
+@@ -356,6 +376,17 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
+       return -1;
+     }
+ 
++    /* DTLS must stay on 1.2 (2026-09-19): enabling MBEDTLS_SSL_PROTO_TLS1_3
++     * for the HTTPS OTA client let the DTLS handshake advertise 1.3 too —
++     * WebRTC peers (aiortc) only speak DTLS 1.2, the handshake degraded,
++     * and the SCTP association/DCEP never completed (data channel dead on
++     * every session; the 20s watchdog then reboot-looped the node). Pin
++     * the datagram endpoint to 1.2 explicitly. */
++#if MBEDTLS_VERSION_NUMBER >= 0x03060000
++    mbedtls_ssl_conf_min_tls_version(&dtls_srtp->conf, MBEDTLS_SSL_VERSION_TLS1_2);
++    mbedtls_ssl_conf_max_tls_version(&dtls_srtp->conf, MBEDTLS_SSL_VERSION_TLS1_2);
++#endif
++
+     mbedtls_ssl_cookie_init(&dtls_srtp->cookie_ctx);
+ #if MBEDTLS_VERSION_NUMBER >= 0x04000000
+     ret = mbedtls_ssl_cookie_setup(&dtls_srtp->cookie_ctx);
+@@ -378,6 +409,11 @@ int dtls_srtp_init(DtlsSrtp* dtls_srtp, DtlsSrtpRole role, void* user_data) {
+       LOGE("mbedtls_ssl_config_defaults(client) failed -0x%.4x", (unsigned int)-ret);
+       return -1;
+     }
++    /* Same DTLS 1.2 pin for the client role — see server-role comment. */
++#if MBEDTLS_VERSION_NUMBER >= 0x03060000
++    mbedtls_ssl_conf_min_tls_version(&dtls_srtp->conf, MBEDTLS_SSL_VERSION_TLS1_2);
++    mbedtls_ssl_conf_max_tls_version(&dtls_srtp->conf, MBEDTLS_SSL_VERSION_TLS1_2);
++#endif
+   }
+ 
+ #if CONFIG_MBEDTLS_DEBUG
