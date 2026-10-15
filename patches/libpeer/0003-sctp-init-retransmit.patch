@@ -1,6 +1,9 @@
-# lenoxvi libpeer patch 0003 (2026-10-14): SCTP INIT retransmit (RFC 4960
-# T1-init) — the lone upstream INIT is dropped by aiortc on ~60% of sessions
+# lenoxvi libpeer patch 0003 (2026-10-14/15): SCTP INIT retransmit (RFC 4960
+# T1-init) — the lone upstream INIT is dropped by aiortc on ~55% of sessions
 # (passive SCTP side + drops app data before its SCTP receiver registers).
+# 2026-10-15: + zero the checksum field before computing the INIT CRC —
+# upstream never did, so every RETRANSMIT carried a wrong CRC and aiortc
+# silently discarded it (why the first 0003 had no measurable effect).
 diff --git a/src/peer_connection.c b/src/peer_connection.c
 --- a/src/peer_connection.c
 +++ b/src/peer_connection.c
@@ -26,7 +29,7 @@ diff --git a/src/sctp.c b/src/sctp.c
  #include "utils.h"
  #if CONFIG_USE_USRSCTP
  #include <usrsctp.h>
-@@ -598,6 +599,35 @@
+@@ -598,6 +599,42 @@
  #endif
  }
  
@@ -54,6 +57,13 @@ diff --git a/src/sctp.c b/src/sctp.c
 +  init_chunk->initial_tsn = htonl(sctp->tsn);
 +  length = ntohs(init_chunk->common.length) + sizeof(SctpHeader);
 +  length = (4 * ((length + 3) / 4));
++  /* lenoxvi 0003 (2026-10-15): CRC32c is computed over the packet WITH the
++   * checksum field zeroed (RFC 4960 §6.8; every other builder here zeroes
++   * it first). Upstream's INIT never did — harmless while the INIT was
++   * built once in a freshly zeroed buffer, but every RETRANSMIT carried the
++   * previous INIT's CRC in the field → wrong checksum → aiortc's
++   * parse_packet raises and _handle_data drops it silently. */
++  header->checksum = 0;
 +  header->checksum = sctp_get_checksum(sctp, sctp->buf, length);
 +  dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length);
 +}
@@ -62,7 +72,7 @@ diff --git a/src/sctp.c b/src/sctp.c
  static int sctp_create_association_impl(Sctp* sctp, DtlsSrtp* dtls_srtp) {
    sctp->dtls_srtp = dtls_srtp;
    sctp->local_port = 5000;
-@@ -702,29 +732,10 @@
+@@ -702,29 +739,10 @@
  
    sctp->sock = sock;
  #else
@@ -96,7 +106,7 @@ diff --git a/src/sctp.c b/src/sctp.c
  #endif
  
    return 0;
-@@ -752,6 +763,27 @@
+@@ -752,6 +770,27 @@
    return ret;
  }
  
