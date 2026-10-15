@@ -110,7 +110,6 @@ static void check_dc_watchdog(void) {
   if (connected_at == 0 || dc_opened) return;
   if (xTaskGetTickCount() - connected_at > pdMS_TO_TICKS(20000)) {
     ESP_LOGE(LOG_TAG, "DataChannel never opened 20s post-connect — reboot re-roll");
-    pipecat_ota_settle_before_reboot("DC never opened");  /* design note stopgap */
     esp_restart();
   }
 }
@@ -138,14 +137,12 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
       return;
     }
 #ifndef LINUX_BUILD
-    pipecat_ota_settle_before_reboot("session dropped");  /* design note stopgap */
     vTaskDelay(pdMS_TO_TICKS(3000));
     esp_restart();
 #endif
   } else if (state == PEER_CONNECTION_CONNECTED) {
    rgb_set_state(RGB_STATE_BRIDGE_CONNECTED);
    connected_at = xTaskGetTickCount();  // arm the DC watchdog
-   pipecat_ota_note_connected();  /* design note gate stopgap: weak proof reached */
  #ifndef LINUX_BUILD
     // Audio init deferred to here: I2S DMA allocations fragment internal RAM,
     // which must stay contiguous through DTLS cert setup (see main.cpp note).
