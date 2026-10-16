@@ -23,10 +23,12 @@ static const char *TAG = "settings";
 #define KEY_NAME "node_name"
 #define KEY_SSID "wifi_ssid"
 #define KEY_PASS "wifi_pass"
+#define KEY_MUTED "muted"
 
 static char g_node_name[NODE_NAME_MAX] = "";
 static char g_wifi_ssid[WIFI_SSID_MAX] = "";
 static char g_wifi_pass[WIFI_PASS_MAX] = "";
+static bool g_muted = false;
 
 #ifndef PIPECAT_ROOM
 #define PIPECAT_ROOM "node"
@@ -112,6 +114,8 @@ bool settings_load(void) {
     nvs_read_str(h, KEY_NAME, g_node_name, sizeof(g_node_name));
     nvs_read_str(h, KEY_SSID, g_wifi_ssid, sizeof(g_wifi_ssid));
     nvs_read_str(h, KEY_PASS, g_wifi_pass, sizeof(g_wifi_pass));
+    uint8_t m = 0;
+    if (nvs_get_u8(h, KEY_MUTED, &m) == ESP_OK) g_muted = (m != 0);
     nvs_close(h);
   }
 
@@ -123,9 +127,29 @@ bool settings_load(void) {
   if (g_wifi_ssid[0] == '\0') strlcpy(g_wifi_ssid, WIFI_SSID, sizeof(g_wifi_ssid));
   if (g_wifi_pass[0] == '\0') strlcpy(g_wifi_pass, WIFI_PASSWORD, sizeof(g_wifi_pass));
 #endif
-  ESP_LOGI(TAG, "settings: name='%s' ssid set=%s pass set=%s",
-           g_node_name, g_wifi_ssid[0] ? "y" : "n", g_wifi_pass[0] ? "y" : "n");
+  ESP_LOGI(TAG, "settings: name='%s' ssid set=%s pass set=%s muted=%s",
+           g_node_name, g_wifi_ssid[0] ? "y" : "n", g_wifi_pass[0] ? "y" : "n",
+           g_muted ? "y" : "n");
   return g_node_name[0] != '\0';
+}
+
+bool settings_get_muted(void) { return g_muted; }
+
+int settings_set_muted(bool muted) {
+  if (muted == g_muted) return 0;   /* no flash write for a no-op */
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+  if (err != ESP_OK) return -err;
+  err = nvs_set_u8(h, KEY_MUTED, muted ? 1 : 0);
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  if (err == ESP_OK) {
+    g_muted = muted;
+    ESP_LOGI(TAG, "mute state stored: %s", muted ? "muted" : "unmuted");
+  } else {
+    ESP_LOGW(TAG, "mute state NOT stored: %s", esp_err_to_name(err));
+  }
+  return err == ESP_OK ? 0 : -err;
 }
 
 const char *settings_get_node_name(void) { return g_node_name; }

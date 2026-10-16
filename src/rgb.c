@@ -52,6 +52,7 @@ bool xvf_led_bus_ready(void);
 #else
 extern esp_err_t xvf_led_write(uint8_t cmd, const uint8_t *payload, size_t len);
 extern bool xvf_led_bus_ready(void);
+extern void xvf_mute_service(void);   /* H4: array mute <-> X0D30 sync (media.cpp) */
 #endif
 
 static esp_err_t led_set_effect(uint8_t effect) {
@@ -124,6 +125,7 @@ static void rgb_task(void *arg) {
             rendered_state = RGB_STATE_DARK;  /* force re-render of current */
             bus_ready_flushed = true;
         }
+        xvf_mute_service();   /* H4: runs every tick, rate-limits itself */
         rgb_state_t s = current_state;
 
         if (s != rendered_state) {

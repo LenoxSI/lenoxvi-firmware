@@ -179,16 +179,30 @@ void cmd_push_firmware_version(void) {
   if (pipecat_ota_rejected_version(rejected, sizeof(rejected))) {
     snprintf(reply, sizeof(reply),
              "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
-             "\"ok\":true,\"data\":{\"fw\":\"%s\",\"rejected\":\"%s\"}}",
-             app_desc->version, rejected);
+             "\"ok\":true,\"data\":{\"fw\":\"%s\",\"rejected\":\"%s\",\"muted\":%s}}",
+             app_desc->version, rejected, pipecat_mic_muted() ? "true" : "false");
   } else {
     snprintf(reply, sizeof(reply),
              "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
-             "\"ok\":true,\"data\":{\"fw\":\"%s\"}}",
-             app_desc->version);
+             "\"ok\":true,\"data\":{\"fw\":\"%s\",\"muted\":%s}}",
+             app_desc->version, pipecat_mic_muted() ? "true" : "false");
   }
   pipecat_rtvi_send_raw(reply);
   ESP_LOGI(TAG, "fw_push: sent running version %s", app_desc->version);
+}
+
+/* H4 (2026-10-16): a physical-button mute change (array) is told to the bot
+ * unprompted, same envelope as fw_push. Called from the WebRTC loop — the
+ * task that owns sending — never from the LED task that detected it. */
+void cmd_service_mute_push(void) {
+  if (!pipecat_mute_push_take()) return;
+  char reply[128];
+  snprintf(reply, sizeof(reply),
+           "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"mute_push\","
+           "\"ok\":true,\"data\":{\"muted\":%s}}",
+           pipecat_mic_muted() ? "true" : "false");
+  pipecat_rtvi_send_raw(reply);
+  ESP_LOGI(TAG, "mute_push: sent muted=%s", pipecat_mic_muted() ? "true" : "false");
 }
 
 bool pipecat_cmd_handle(const cJSON *msg) {
@@ -214,24 +228,16 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     snprintf(reply, sizeof(reply),
              "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"get_info\","
              "\"ok\":true,\"data\":{\"name\":\"%s\",\"mac\":\"%02x%02x%02x%02x%02x%02x\","
-#if LENOXVI_BOARD_FLEX
              "\"fw\":\"%s\",\"muted\":%s}}",
              settings_get_node_name(), mac[0], mac[1], mac[2], mac[3],
              mac[4], mac[5], esp_app_get_description()->version,
              pipecat_mic_muted() ? "true" : "false");
-#else
-             "\"fw\":\"%s\"}}",
-             settings_get_node_name(), mac[0], mac[1], mac[2], mac[3],
-             mac[4], mac[5], esp_app_get_description()->version);
-#endif
     pipecat_rtvi_send_raw(reply);
-#if LENOXVI_BOARD_FLEX
   } else if (strcmp(cmd, "set_mute") == 0) {
-    /* Software mic mute (flex 1.1.0, 2026-10-07): "mute": true|false,
-     * or omit for toggle. Echoes the resulting state so the dashboard
-     * renders truth from the ack, not optimistic UI. Flex-only for now:
-     * the array board's mute is its physical button (handled by the stock
-     * XMOS image); the bot's set_mute route 501s honestly on array. */
+    /* Mic mute (flex 1.1.0; both boards since 1.2.11, H4): "mute":
+     * true|false, or omit for toggle. Persisted; on array it drives the
+     * same XMOS pin as the physical button (red LED). Echoes the resulting
+     * state so the dashboard renders truth from the ack, not optimistic UI. */
     const cJSON *j_mute = cJSON_GetObjectItem(msg, "mute");
     bool now;
     if (j_mute == NULL || !cJSON_IsBool(j_mute)) {
@@ -246,7 +252,6 @@ bool pipecat_cmd_handle(const cJSON *msg) {
              "\"data\":{\"muted\":%s}}",
              now ? "true" : "false");
     pipecat_rtvi_send_raw(reply);
-#endif
   } else if (strcmp(cmd, "set_name") == 0) {
     const cJSON *j_name = cJSON_GetObjectItem(msg, "name");
     if (!cJSON_IsString(j_name)) {

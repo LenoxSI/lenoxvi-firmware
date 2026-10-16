@@ -28,6 +28,7 @@ void cmd_send_simple(const char *cmd, bool ok, const char *note);
 /* Connect-push: send the running firmware version to the bot, once per
  * data-channel open (1.1.2 — Nodes table FW column). */
 void cmd_push_firmware_version(void);
+void cmd_service_mute_push(void);   /* H4: send a pending button mute change */
 
 #ifdef __cplusplus
 }

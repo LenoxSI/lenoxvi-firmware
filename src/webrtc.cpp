@@ -252,4 +252,5 @@ void pipecat_webrtc_loop() {
   peer_connection_loop(peer_connection);
   check_connect_watchdog();
   check_dc_watchdog();
+  if (dc_opened) cmd_service_mute_push();   /* H4: button changes reach the bot */
 }

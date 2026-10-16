@@ -22,6 +22,7 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   rgb_init();
   settings_load();  /* NVS name + wifi creds; bakes become fallbacks */
+  pipecat_mic_mute_init();  /* H4: a muted node boots muted */
   /* Hostname follows the node name (UniFi shows it); sta netif exists
    * after esp_netif_init inside pipecat_init_wifi — set it from the
    * got-ip path instead (esp_netif_set_hostname on the default sta). */

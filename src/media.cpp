@@ -27,6 +27,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "main.h"
+#include "settings.h"
 
 /* ── Pins / addresses (XIAO-integrated reSpeaker, Seeed porting config) ── */
 #define I2C_PORT      I2C_NUM_0
@@ -70,18 +71,39 @@ static i2s_std_config_t         g_std_cfg;    /* saved for full I2S re-init (hea
 static i2s_chan_config_t        g_chan_cfg;
 static std::atomic<bool>        is_playing = false;
 
-#if LENOXVI_BOARD_FLEX
-/* Software mic mute (flex 1.1.0, 2026-10-07): the Flex board has no
- * physical Mute button — the array node's mute is board hardware. The
- * dashboard's Mute button sends cmd "set_mute"; the zeroing happens in
- * the exact same place the turn lock (is_playing) zeroes the mic, so
- * the mute path is one atomic read + memset per frame. */
-static std::atomic<bool>        mic_mute = false;
+/* Mic mute (H4, 2026-10-16) — ONE state per node, both boards:
+ *   - persisted in NVS (settings_*_muted): a muted node stays muted across
+ *     reboots and OTA; restored at boot by pipecat_mic_mute_init().
+ *   - the mic is zeroed here on every frame while muted (the same place the
+ *     turn lock zeroes it — one atomic read + memset).
+ *   - ARRAY: the board's physical Mute button and this state are the SAME
+ *     thing — XMOS GPO pin X0D30 ("mute LED + mic mute control, high =
+ *     mute", Seeed wiki). A software set writes X0D30 (red LED on, XMOS
+ *     mutes the mics); xvf_mute_service() polls X0D30 from the LED task and
+ *     adopts a button press (saved + pushed to the bot as mute_push).
+ *   - FLEX: no button — the software state is the whole story.
+ * mute_seq bumps on every software set, so a poll whose read raced a set
+ * never mistakes the old pin level for a button press. */
+static std::atomic<bool>     mic_mute = false;
+static std::atomic<uint32_t> mute_seq = 0;
+static std::atomic<bool>     mute_hw_dirty = false;     /* array: X0D30 needs (re)writing */
+static std::atomic<bool>     mute_push_pending = false; /* button change not yet told to the bot */
 
-bool pipecat_mic_muted(void)        { return mic_mute.load(); }
-bool pipecat_mic_mute_set(bool m)   { mic_mute.store(m); return mic_mute.load(); }
-bool pipecat_mic_mute_toggle(void)  { mic_mute.store(!mic_mute.load()); return mic_mute.load(); }
-#endif
+void pipecat_mic_mute_init(void) {
+    mic_mute.store(settings_get_muted());
+    mute_hw_dirty.store(true);   /* XMOS powers up unmuted: re-apply the saved state */
+    ESP_LOGI(LOG_TAG, "mute: restored %s from NVS", mic_mute.load() ? "MUTED" : "unmuted");
+}
+bool pipecat_mic_muted(void) { return mic_mute.load(); }
+bool pipecat_mic_mute_set(bool m) {
+    mute_seq.fetch_add(1);
+    mic_mute.store(m);
+    mute_hw_dirty.store(true);
+    settings_set_muted(m);
+    return m;
+}
+bool pipecat_mic_mute_toggle(void) { return pipecat_mic_mute_set(!mic_mute.load()); }
+bool pipecat_mute_push_take(void) { return mute_push_pending.exchange(false); }
 
 static void update_is_playing(int16_t *buf, size_t n) {
     for (size_t i = 0; i < n; i++) {
@@ -187,6 +209,49 @@ extern "C" bool xvf_led_bus_ready(void) { return xvf_bus_ready; }
 extern "C" esp_err_t xvf_led_write(uint8_t cmd, const uint8_t *payload, size_t len) {
     if (len > 29) return ESP_ERR_INVALID_SIZE;
     return xvf_write_bytes(20, cmd, payload, len);
+}
+
+static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd, uint8_t *out, size_t out_len);
+
+/* Array mute sync (H4): called from the LED task's loop (array only — flex
+ * has no button and no LED task). Rate-limited to 4x/s. GPO servicer
+ * (resid 20): WRITE_VALUE (cmd 1) payload {pin, level}; READ_VALUES (cmd 0)
+ * returns 5 bytes in pin order X0D11, X0D30, X0D31, X0D33, X0D39. */
+#define XVF_RESID_GPO            20
+#define XVF_CMD_GPO_READ_VALUES   0
+#define XVF_CMD_GPO_WRITE_VALUE   1
+#define XVF_GPO_MUTE_PIN         30
+#define XVF_GPO_MUTE_INDEX        1
+extern "C" void xvf_mute_service(void) {
+#if LENOXVI_BOARD_ARRAY
+    static TickType_t last = 0;
+    if (!xvf_bus_ready) return;
+    TickType_t now = xTaskGetTickCount();
+    if (now - last < pdMS_TO_TICKS(250)) return;
+    last = now;
+    if (mute_hw_dirty.load()) {
+        uint32_t seq = mute_seq.load();
+        bool want = mic_mute.load();
+        uint8_t p[2] = {XVF_GPO_MUTE_PIN, (uint8_t)(want ? 1 : 0)};
+        if (xvf_write_bytes(XVF_RESID_GPO, XVF_CMD_GPO_WRITE_VALUE, p, 2) == ESP_OK
+            && mute_seq.load() == seq) {
+            mute_hw_dirty.store(false);
+            ESP_LOGI(LOG_TAG, "mute: X0D30 <- %d (%s)", want ? 1 : 0, want ? "muted" : "unmuted");
+        }
+        return;   /* read back on the next tick */
+    }
+    uint32_t seq = mute_seq.load();
+    uint8_t v[5] = {0};
+    if (xvf_read_bytes(XVF_RESID_GPO, XVF_CMD_GPO_READ_VALUES, v, sizeof(v)) != ESP_OK) return;
+    if (mute_seq.load() != seq || mute_hw_dirty.load()) return;   /* a software set raced the read */
+    bool hw = v[XVF_GPO_MUTE_INDEX] != 0;
+    if (hw != mic_mute.load()) {
+        mic_mute.store(hw);
+        settings_set_muted(hw);
+        mute_push_pending.store(true);
+        ESP_LOGI(LOG_TAG, "mute: physical button -> %s", hw ? "MUTED" : "unmuted");
+    }
+#endif
 }
 
 /* Read path per Seeed wiki frame format: write [resid][cmd|0x80][read_len+1],
@@ -549,12 +614,10 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
         diag_peak_lo = 0;
     }
     if (is_playing) { memset(mic_mono16, 0, PCM_MONO_BYTES); }
-#if LENOXVI_BOARD_FLEX
-    /* Software mute (flex 1.1.0): same zeroing as the turn lock — one
-     * atomic read; when muted the encoder sees silence (7-byte DTX
-     * frames on the wire). */
+    /* Mic mute (H4): same zeroing as the turn lock — when muted the encoder
+     * sees silence (7-byte DTX frames on the wire). On array the XMOS has
+     * muted the mics too (X0D30); this is the belt to that brace. */
     if (mic_mute.load()) { memset(mic_mono16, 0, PCM_MONO_BYTES); }
-#endif
     auto n = opus_encode(opus_encoder, (const opus_int16 *)mic_mono16,
                          PCM_MONO_SAMPLES, encoder_output_buffer, OPUS_BUFFER_SIZE);
     /* Encoder-side diag: what actually leaves the node. If mic peaks are
