@@ -16,6 +16,7 @@
 #include <nvs.h>
 #include <string.h>
 #include <ctype.h>
+#include <esp_memory_utils.h>
 
 static const char *TAG = "settings";
 
@@ -33,6 +34,21 @@ static bool g_muted = false;
 #ifndef PIPECAT_ROOM
 #define PIPECAT_ROOM "node"
 #endif
+
+/* NVS writes suspend the flash cache; a task whose STACK is in PSRAM then
+ * double-faults the core (2026-09-29 set_name; again 2026-10-16 with the
+ * first 1.2.11 set_mute). Every setter checks first and REFUSES with an
+ * error instead of crashing the node — route writes through cmd.cpp's
+ * nvs_run (internal-RAM stack). */
+static bool stack_in_psram(const char *what) {
+  int probe = 0;
+  if (esp_ptr_external_ram(&probe)) {
+    ESP_LOGE(TAG, "%s: refused — called on a PSRAM stack (would crash the "
+             "node); route the write through nvs_run", what);
+    return true;
+  }
+  return false;
+}
 
 /* Copy a value from NVS if the key exists and fits; leave dst
  * untouched otherwise. */
@@ -52,6 +68,7 @@ static bool is_valid_name_char(char c) {
 }
 
 int settings_set_node_name(const char *name) {
+  if (stack_in_psram("set_node_name")) return -ESP_ERR_INVALID_STATE;
   if (!name) return -1;
   char trimmed[NODE_NAME_MAX];
   size_t n = 0;
@@ -82,6 +99,7 @@ int settings_set_node_name(const char *name) {
 }
 
 int settings_set_wifi(const char *ssid, const char *password) {
+  if (stack_in_psram("set_wifi")) return -ESP_ERR_INVALID_STATE;
   nvs_handle_t h;
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
   if (err != ESP_OK) return err;
@@ -137,6 +155,7 @@ bool settings_get_muted(void) { return g_muted; }
 
 int settings_set_muted(bool muted) {
   if (muted == g_muted) return 0;   /* no flash write for a no-op */
+  if (stack_in_psram("set_muted")) return -ESP_ERR_INVALID_STATE;
   nvs_handle_t h;
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
   if (err != ESP_OK) return -err;

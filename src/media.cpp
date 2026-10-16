@@ -95,11 +95,13 @@ void pipecat_mic_mute_init(void) {
     ESP_LOGI(LOG_TAG, "mute: restored %s from NVS", mic_mute.load() ? "MUTED" : "unmuted");
 }
 bool pipecat_mic_muted(void) { return mic_mute.load(); }
+/* Applies the mute; does NOT persist it — the caller saves it from an
+ * internal-RAM stack (cmd.cpp set_mute -> nvs_run). Never write NVS here:
+ * the command handler's stack is in PSRAM. */
 bool pipecat_mic_mute_set(bool m) {
     mute_seq.fetch_add(1);
     mic_mute.store(m);
     mute_hw_dirty.store(true);
-    settings_set_muted(m);
     return m;
 }
 bool pipecat_mic_mute_toggle(void) { return pipecat_mic_mute_set(!mic_mute.load()); }
@@ -247,7 +249,7 @@ extern "C" void xvf_mute_service(void) {
     bool hw = v[XVF_GPO_MUTE_INDEX] != 0;
     if (hw != mic_mute.load()) {
         mic_mute.store(hw);
-        settings_set_muted(hw);
+        settings_set_muted(hw);   /* safe HERE: the LED task's stack is internal RAM (xTaskCreate) */
         mute_push_pending.store(true);
         ESP_LOGI(LOG_TAG, "mute: physical button -> %s", hw ? "MUTED" : "unmuted");
     }

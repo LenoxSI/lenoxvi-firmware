@@ -55,7 +55,7 @@ void cmd_send_simple(const char *cmd, bool ok, const char *note) {
  * short-lived task on a static internal stack. One slot is safe —
  * the RTVI task serializes commands (same pattern as liveness). */
 typedef struct {
-  int kind;  /* 0 = set_name, 1 = set_wifi */
+  int kind;  /* 0 = set_name, 1 = set_wifi, 2 = mute (a != NULL = muted) */
   const char *a, *b;
   int rc;
 } nvs_job_t;
@@ -66,7 +66,8 @@ static SemaphoreHandle_t s_job_done;
 static void nvs_job_task(void *arg) {
   nvs_job_t *job = (nvs_job_t *)arg;
   job->rc = job->kind == 0 ? settings_set_node_name(job->a)
-                           : settings_set_wifi(job->a, job->b);
+          : job->kind == 1 ? settings_set_wifi(job->a, job->b)
+                           : settings_set_muted(job->a != NULL);
   xSemaphoreGive(s_job_done);
   vTaskDelete(NULL);
 }
@@ -244,6 +245,14 @@ bool pipecat_cmd_handle(const cJSON *msg) {
       now = pipecat_mic_mute_toggle();
     } else {
       now = pipecat_mic_mute_set(cJSON_IsTrue(j_mute));
+    }
+    /* Persist through the internal-stack runner — THIS task's stack is in
+     * PSRAM and a direct NVS write double-faults the core (the 2026-09-29
+     * set_name crash; repeated by the first 1.2.11 build, 2026-10-16). The
+     * mute itself already applied above; a failed save only costs
+     * persistence, and says so in the log. */
+    if (nvs_run(2, now ? "1" : NULL, NULL) != 0) {
+      ESP_LOGW(TAG, "set_mute: applied but NOT saved (nvs error)");
     }
     char reply[160];
     snprintf(reply, sizeof(reply),
