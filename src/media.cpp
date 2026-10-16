@@ -224,6 +224,18 @@ static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd, uint8_t *out, size_t
 #define XVF_CMD_GPO_WRITE_VALUE   1
 #define XVF_GPO_MUTE_PIN         30
 #define XVF_GPO_MUTE_INDEX        1
+/* The physical button's effect is read from the PIN LEVEL, not the GPO
+ * servicer: IO_CONFIG (resid 36) GPI_VALUE_ALL (cmd 6) returns a 32-bit
+ * port value and bit 30 = X0D30 ("HIGH (Muted)" — Seeed's own mute-state
+ * example). 1.2.11/1.2.12 read GPO_READ_VALUES instead and never saw a
+ * button press (2026-10-16 live test). Both raw readings are kept for
+ * get_info ("mute_hw") so the source can be checked live from the bot. */
+#define XVF_RESID_IO_CONFIG      36
+#define XVF_CMD_GPI_VALUE_ALL     6
+static volatile int  s_dbg_gpo30 = -1;      /* GPO_READ_VALUES[1], -1 = read failed */
+static volatile long s_dbg_io = -1;         /* GPI_VALUE_ALL raw (32-bit), -1 = read failed */
+extern "C" void pipecat_mute_hw_diag(int *gpo30, long *io) { *gpo30 = s_dbg_gpo30; *io = s_dbg_io; }
+
 extern "C" void xvf_mute_service(void) {
 #if LENOXVI_BOARD_ARRAY
     static TickType_t last = 0;
@@ -243,10 +255,18 @@ extern "C" void xvf_mute_service(void) {
         return;   /* read back on the next tick */
     }
     uint32_t seq = mute_seq.load();
-    uint8_t v[5] = {0};
-    if (xvf_read_bytes(XVF_RESID_GPO, XVF_CMD_GPO_READ_VALUES, v, sizeof(v)) != ESP_OK) return;
+    uint8_t g[5] = {0};
+    s_dbg_gpo30 = (xvf_read_bytes(XVF_RESID_GPO, XVF_CMD_GPO_READ_VALUES, g, sizeof(g)) == ESP_OK)
+                  ? (int)g[XVF_GPO_MUTE_INDEX] : -1;
+    uint8_t io[4] = {0};
+    if (xvf_read_bytes(XVF_RESID_IO_CONFIG, XVF_CMD_GPI_VALUE_ALL, io, sizeof(io)) != ESP_OK) {
+        s_dbg_io = -1;
+        return;   /* no trustworthy pin level: never guess a button press */
+    }
+    uint32_t v = (uint32_t)io[0] | ((uint32_t)io[1] << 8) | ((uint32_t)io[2] << 16) | ((uint32_t)io[3] << 24);
+    s_dbg_io = (long)v;
     if (mute_seq.load() != seq || mute_hw_dirty.load()) return;   /* a software set raced the read */
-    bool hw = v[XVF_GPO_MUTE_INDEX] != 0;
+    bool hw = (v >> XVF_GPO_MUTE_PIN) & 1u;
     if (hw != mic_mute.load()) {
         mic_mute.store(hw);
         settings_set_muted(hw);   /* safe HERE: the LED task's stack is internal RAM (xTaskCreate) */
