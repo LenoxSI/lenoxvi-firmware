@@ -85,19 +85,17 @@ static int compare_versions(const char *local, const char *remote) {
     return 0;
 }
 
-/* OTA track key (design note, 2026-10-07): the bot serves per-model
- * manifests. The array node (XVF3800 mic-array board, 1.1.x) keeps the
- * legacy shared manifest URL — the DEPLOYED 1.1.3 fleet requests
- * /firmware/version and the server serves it; an unset track here
- * must stay byte-identical to that. The flex node (reSpeaker Flex,
- * 1.0.x track) builds with -DXVF_OTA_TRACK="flex" and reads
- * /firmware/flex/version — a bump on one track can NEVER cross-flash
- * the other. */
-#ifdef XVF_OTA_TRACK
-#define FW_URL_FMT "%.*s/firmware/" XVF_OTA_TRACK "/%s"
-#else
-#define FW_URL_FMT "%.*s/firmware/%s"
+/* OTA track (one name per firmware line, 2026-10-16): each line's
+ * CMakeLists hard-codes XVF_OTA_TRACK ("array" | "flex"), so an image only
+ * ever reads /firmware/<its track>/version and can never pick up the other
+ * line's manifest. Never env-driven, and no silent fallback: a build without
+ * a track is a compile error. (The bot still serves the old track-less
+ * /firmware/version for array images <= 1.2.8 — that URL is not built
+ * into any new image.) */
+#ifndef XVF_OTA_TRACK
+#error "XVF_OTA_TRACK must be set by the firmware line's CMakeLists (array | flex)"
 #endif
+#define FW_URL_FMT "%.*s/firmware/" XVF_OTA_TRACK "/%s"
 
 static void build_firmware_url(char *out, size_t out_len, const char *suffix) {
     const char *base = PIPECAT_SMALLWEBRTC_URL;
@@ -160,6 +158,7 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url);
  * self-contained (esp_ota_abort releases the partition), so a retry is a
  * clean restart of the download. */
 #define OTA_DOWNLOAD_ATTEMPTS 3
+#define OTA_ERR_WRONG_BOARD ESP_ERR_NOT_SUPPORTED   /* fw M4 refusal: never retried */
 static const uint32_t k_ota_retry_delay_ms[OTA_DOWNLOAD_ATTEMPTS - 1] = {10000, 30000};
 
 static esp_err_t download_and_flash_ota(const char *firmware_url) {
@@ -167,7 +166,7 @@ static esp_err_t download_and_flash_ota(const char *firmware_url) {
     esp_err_t rc = ESP_FAIL;
     for (int attempt = 1; attempt <= OTA_DOWNLOAD_ATTEMPTS; attempt++) {
         rc = download_and_flash_ota_impl(firmware_url);
-        if (rc == ESP_OK) break;
+        if (rc == ESP_OK || rc == OTA_ERR_WRONG_BOARD) break;  /* wrong line: retrying can't help */
         if (attempt < OTA_DOWNLOAD_ATTEMPTS) {
             uint32_t delay_ms = k_ota_retry_delay_ms[attempt - 1];
             ESP_LOGW(OTA_TAG, "OTA attempt %d/%d failed (%s) — retrying in %lu s",
@@ -188,6 +187,36 @@ static esp_err_t download_and_flash_ota(const char *firmware_url) {
         }
     }
     return rc;
+}
+
+/* fw M4 board identity (2026-10-16): an image names its own line in
+ * esp_app_desc_t.project_name (CMake project(): array_esp32 / flex_esp32).
+ * The incoming image's descriptor rides its first bytes — 24-byte image
+ * header + 8-byte segment header, then magic at byte 32 and project_name at
+ * byte 80 — and it must equal the RUNNING image's name. A mislaid manifest
+ * or a hand-copied .bin therefore cannot cross-flash this board: the
+ * partition write is aborted before esp_ota_set_boot_partition, which is the
+ * only step that matters. Writing the inactive partition first is harmless. */
+#define OTA_IDENT_BYTES 112
+#define OTA_IDENT_MAGIC_OFF 32
+#define OTA_IDENT_NAME_OFF 80
+
+static bool incoming_image_is_ours(const uint8_t *hdr) {
+    const uint8_t magic[4] = {0x32, 0x54, 0xCD, 0xAB};   /* ESP_APP_DESC_MAGIC_WORD, LE */
+    const char *ours = esp_app_get_description()->project_name;
+    char theirs[33] = {0};
+    if (memcmp(hdr + OTA_IDENT_MAGIC_OFF, magic, sizeof(magic)) != 0) {
+        ESP_LOGE(OTA_TAG, "incoming image has no app descriptor — not flashing");
+        return false;
+    }
+    memcpy(theirs, hdr + OTA_IDENT_NAME_OFF, 32);
+    if (strncmp(theirs, ours, 32) != 0) {
+        ESP_LOGE(OTA_TAG, "incoming image is '%s' but this board runs '%s' — wrong "
+                 "firmware line, refusing it (cross-flash guard)", theirs, ours);
+        return false;
+    }
+    ESP_LOGI(OTA_TAG, "incoming image identity OK (%s)", theirs);
+    return true;
 }
 
 static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
@@ -269,12 +298,25 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
 
     int total_read = 0;
     bool error = false;
+    bool wrong_board = false;
+    uint8_t ident[OTA_IDENT_BYTES];
+    int ident_len = 0;
     while (total_read < content_length) {
         int read_len = esp_http_client_read(client, buf, OTA_DOWNLOAD_BUF_SIZE);
         if (read_len <= 0) {
             ESP_LOGE(OTA_TAG, "HTTP read error at %d/%d", total_read, content_length);
             error = true;
             break;
+        }
+        if (ident_len < OTA_IDENT_BYTES) {   /* M4: collect the header, check once */
+            int take = read_len < OTA_IDENT_BYTES - ident_len ? read_len : OTA_IDENT_BYTES - ident_len;
+            memcpy(ident + ident_len, buf, take);
+            ident_len += take;
+            if (ident_len == OTA_IDENT_BYTES && !incoming_image_is_ours(ident)) {
+                wrong_board = true;
+                error = true;
+                break;
+            }
         }
         err = esp_ota_write(update_handle, buf, read_len);
         if (err != ESP_OK) {
@@ -293,7 +335,11 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
-    if (error || total_read != content_length) {
+    if (wrong_board) {
+        esp_ota_abort(update_handle);
+        return OTA_ERR_WRONG_BOARD;
+    }
+    if (error || total_read != content_length || ident_len < OTA_IDENT_BYTES) {
         ESP_LOGE(OTA_TAG, "Download incomplete: %d/%d", total_read, content_length);
         esp_ota_abort(update_handle);
         return ESP_FAIL;
