@@ -23,7 +23,7 @@ extern bool pipecat_mic_muted(void);
 extern bool pipecat_mic_mute_toggle(void);
 extern bool pipecat_mic_mute_set(bool muted);
 extern bool pipecat_mute_push_take(void);    // true once per button change
-extern "C" void pipecat_mute_hw_diag(int *gpo30, long *io);  // array: raw mute readings (-1 = n/a)
+extern "C" void pipecat_mute_hw_diag(int *btn);  // array: raw mute button bit (1 up, 0 down, -1 n/a)
 
 // WebRTC / Signalling
 extern void pipecat_init_webrtc();

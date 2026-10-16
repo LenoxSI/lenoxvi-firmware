@@ -223,18 +223,18 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     vTaskDelay(pdMS_TO_TICKS(300));  /* let the ack leave the wire */
     esp_restart();
   } else if (strcmp(cmd, "get_info") == 0) {
-    int dbg_gpo30; long dbg_io;
-    pipecat_mute_hw_diag(&dbg_gpo30, &dbg_io);   /* H4 bring-up: which register sees the button */
+    int dbg_btn;
+    pipecat_mute_hw_diag(&dbg_btn);   /* array: raw mute-button bit (support/diagnostics) */
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char reply[512];
     snprintf(reply, sizeof(reply),
              "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"get_info\","
              "\"ok\":true,\"data\":{\"name\":\"%s\",\"mac\":\"%02x%02x%02x%02x%02x%02x\","
-             "\"fw\":\"%s\",\"muted\":%s,\"mute_hw\":{\"gpo30\":%d,\"io\":%ld}}}",
+             "\"fw\":\"%s\",\"muted\":%s,\"mute_hw\":{\"btn\":%d}}}",
              settings_get_node_name(), mac[0], mac[1], mac[2], mac[3],
              mac[4], mac[5], esp_app_get_description()->version,
-             pipecat_mic_muted() ? "true" : "false", dbg_gpo30, dbg_io);
+             pipecat_mic_muted() ? "true" : "false", dbg_btn);
     pipecat_rtvi_send_raw(reply);
   } else if (strcmp(cmd, "set_mute") == 0) {
     /* Mic mute (flex 1.1.0; both boards since 1.2.11, H4): "mute":

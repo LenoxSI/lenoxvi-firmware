@@ -215,34 +215,36 @@ extern "C" esp_err_t xvf_led_write(uint8_t cmd, const uint8_t *payload, size_t l
 
 static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd, uint8_t *out, size_t out_len);
 
-/* Array mute sync (H4): called from the LED task's loop (array only — flex
- * has no button and no LED task). Rate-limited to 4x/s. GPO servicer
- * (resid 20): WRITE_VALUE (cmd 1) payload {pin, level}; READ_VALUES (cmd 0)
- * returns 5 bytes in pin order X0D11, X0D30, X0D31, X0D33, X0D39. */
+/* Array mute sync (H4): called from the LED task's loop on every tick (array
+ * only — flex has no button and no LED task). GPO servicer (resid 20)
+ * WRITE_VALUE (cmd 1) payload {pin, level} drives X0D30 = mute + red LED. */
 #define XVF_RESID_GPO            20
-#define XVF_CMD_GPO_READ_VALUES   0
 #define XVF_CMD_GPO_WRITE_VALUE   1
 #define XVF_GPO_MUTE_PIN         30
-#define XVF_GPO_MUTE_INDEX        1
-/* The physical button's effect is read from the PIN LEVEL, not the GPO
- * servicer: IO_CONFIG (resid 36) GPI_VALUE_ALL (cmd 6) returns a 32-bit
- * port value and bit 30 = X0D30 ("HIGH (Muted)" — Seeed's own mute-state
- * example). 1.2.11/1.2.12 read GPO_READ_VALUES instead and never saw a
- * button press (2026-10-16 live test). Both raw readings are kept for
- * get_info ("mute_hw") so the source can be checked live from the bot. */
+/* Physical button (array): the XMOS toggles its own mute (X0D30 + red LED)
+ * on a press, but X0D30 can't be read back on this image (GPO_READ_VALUES
+ * fails; IO_CONFIG GPI_VALUE_ALL bit 30 is not the pin — both measured live
+ * 2026-10-16, 1.2.11-1.2.13). What IS readable: GPI_VALUE_ALL (resid 36,
+ * cmd 6) bit 0 = X1D09, the button itself — 1 released, 0 pressed (Seeed
+ * GPI table; held 5 s = 0 throughout, measured 18:27:42). So:
+ *   - press edge (2 consecutive pressed reads after released) -> flip
+ *     mic_mute, save it, push it to the bot (mute_push);
+ *   - release edge -> re-write X0D30 = mic_mute: whichever edge the XMOS
+ *     toggles on, it has toggled by now, and if it ever disagreed with us
+ *     (a missed press) the LED snaps back to the dashboard's truth.
+ * A failed read (~15-30% of reads on this bus) never counts as either edge.
+ * get_info reports the raw button bit as mute_hw.btn (-1 = last read failed). */
 #define XVF_RESID_IO_CONFIG      36
 #define XVF_CMD_GPI_VALUE_ALL     6
-static volatile int  s_dbg_gpo30 = -1;      /* GPO_READ_VALUES[1], -1 = read failed */
-static volatile long s_dbg_io = -1;         /* GPI_VALUE_ALL raw (32-bit), -1 = read failed */
-extern "C" void pipecat_mute_hw_diag(int *gpo30, long *io) { *gpo30 = s_dbg_gpo30; *io = s_dbg_io; }
+#define XVF_GPI_BUTTON_BIT        0
+static volatile int s_dbg_btn = -1;
+extern "C" void pipecat_mute_hw_diag(int *btn) { *btn = s_dbg_btn; }
 
 extern "C" void xvf_mute_service(void) {
 #if LENOXVI_BOARD_ARRAY
-    static TickType_t last = 0;
+    static int stable = 1;        /* debounced button: 1 released, 0 pressed */
+    static int pending = -1;      /* candidate level awaiting a second read */
     if (!xvf_bus_ready) return;
-    TickType_t now = xTaskGetTickCount();
-    if (now - last < pdMS_TO_TICKS(250)) return;
-    last = now;
     if (mute_hw_dirty.load()) {
         uint32_t seq = mute_seq.load();
         bool want = mic_mute.load();
@@ -252,26 +254,28 @@ extern "C" void xvf_mute_service(void) {
             mute_hw_dirty.store(false);
             ESP_LOGI(LOG_TAG, "mute: X0D30 <- %d (%s)", want ? 1 : 0, want ? "muted" : "unmuted");
         }
-        return;   /* read back on the next tick */
+        return;
     }
-    uint32_t seq = mute_seq.load();
-    uint8_t g[5] = {0};
-    s_dbg_gpo30 = (xvf_read_bytes(XVF_RESID_GPO, XVF_CMD_GPO_READ_VALUES, g, sizeof(g)) == ESP_OK)
-                  ? (int)g[XVF_GPO_MUTE_INDEX] : -1;
     uint8_t io[4] = {0};
     if (xvf_read_bytes(XVF_RESID_IO_CONFIG, XVF_CMD_GPI_VALUE_ALL, io, sizeof(io)) != ESP_OK) {
-        s_dbg_io = -1;
-        return;   /* no trustworthy pin level: never guess a button press */
+        s_dbg_btn = -1;
+        return;   /* unknown: neither edge */
     }
-    uint32_t v = (uint32_t)io[0] | ((uint32_t)io[1] << 8) | ((uint32_t)io[2] << 16) | ((uint32_t)io[3] << 24);
-    s_dbg_io = (long)v;
-    if (mute_seq.load() != seq || mute_hw_dirty.load()) return;   /* a software set raced the read */
-    bool hw = (v >> XVF_GPO_MUTE_PIN) & 1u;
-    if (hw != mic_mute.load()) {
-        mic_mute.store(hw);
-        settings_set_muted(hw);   /* safe HERE: the LED task's stack is internal RAM (xTaskCreate) */
+    int level = (io[0] >> XVF_GPI_BUTTON_BIT) & 1;
+    s_dbg_btn = level;
+    if (level == stable) { pending = -1; return; }
+    if (pending != level) { pending = level; return; }   /* first sighting: confirm next read */
+    stable = level;
+    pending = -1;
+    if (level == 0) {             /* press */
+        mute_seq.fetch_add(1);
+        bool now = !mic_mute.load();
+        mic_mute.store(now);
+        settings_set_muted(now);  /* safe HERE: the LED task's stack is internal RAM (xTaskCreate) */
         mute_push_pending.store(true);
-        ESP_LOGI(LOG_TAG, "mute: physical button -> %s", hw ? "MUTED" : "unmuted");
+        ESP_LOGI(LOG_TAG, "mute: physical button -> %s", now ? "MUTED" : "unmuted");
+    } else {                      /* release: make the pin agree with us */
+        mute_hw_dirty.store(true);
     }
 #endif
 }
