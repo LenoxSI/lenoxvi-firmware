@@ -27,6 +27,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "main.h"
+#include "esp_rom_sys.h"
 #include "settings.h"
 
 /* ── Pins / addresses (XIAO-integrated reSpeaker, Seeed porting config) ── */
@@ -253,15 +254,23 @@ extern "C" void pipecat_mute_hw_diag(int *btn) { *btn = s_dbg_btn; }
  * 100 ms timeout + 20 ms gap — one failed read could blind the poll for
  * ~0.5 s, and with 15-30% of reads failing, quick taps fell into those gaps
  * (only long holds were caught; live test 2026-10-16 18:50). Here a failed
- * read costs one tick. Busy/odd status = unknown, never a level. */
+ * read costs one tick. Busy/odd status = unknown, never a level.
+ * Diag (get_info mute_hw.btn): 1/0 level, -1 bus error, -2 WAIT x5,
+ * -100-N servicer status N. */
 static int xvf_button_read_once(void) {
     if (xvf3800 == NULL) return -1;
     uint8_t req[3] = {XVF_RESID_IO_CONFIG, (uint8_t)(XVF_CMD_GPI_VALUE_ALL | XVF_READ_BIT), 4 + 1};
     uint8_t resp[5] = {0};
-    if (i2c_master_transmit_receive(xvf3800, req, sizeof(req), resp, sizeof(resp),
-                                    pdMS_TO_TICKS(30)) != ESP_OK) return -1;
-    if (resp[0] != XVF_CTRL_DONE) return -1;
-    return (resp[1] >> XVF_GPI_BUTTON_BIT) & 1;
+    /* The servicer usually answers WAIT to a fresh ask and has the value a
+     * moment later (1.2.16's single attempt failed 100%) — re-ask fast. */
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (attempt) esp_rom_delay_us(2000);
+        if (i2c_master_transmit_receive(xvf3800, req, sizeof(req), resp, sizeof(resp),
+                                        pdMS_TO_TICKS(30)) != ESP_OK) return -1;   /* bus error */
+        if (resp[0] == XVF_CTRL_DONE) return (resp[1] >> XVF_GPI_BUTTON_BIT) & 1;
+        if (resp[0] != XVF_CTRL_WAIT) return -100 - resp[0];   /* other status (diag) */
+    }
+    return -2;                    /* still WAIT after 5 asks */
 }
 
 static bool xvf_mute_pin_write_once(bool on) {
