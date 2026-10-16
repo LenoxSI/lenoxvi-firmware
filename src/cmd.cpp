@@ -214,10 +214,39 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     snprintf(reply, sizeof(reply),
              "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"get_info\","
              "\"ok\":true,\"data\":{\"name\":\"%s\",\"mac\":\"%02x%02x%02x%02x%02x%02x\","
+#if LENOXVI_BOARD_FLEX
+             "\"fw\":\"%s\",\"muted\":%s}}",
+             settings_get_node_name(), mac[0], mac[1], mac[2], mac[3],
+             mac[4], mac[5], esp_app_get_description()->version,
+             pipecat_mic_muted() ? "true" : "false");
+#else
              "\"fw\":\"%s\"}}",
              settings_get_node_name(), mac[0], mac[1], mac[2], mac[3],
              mac[4], mac[5], esp_app_get_description()->version);
+#endif
     pipecat_rtvi_send_raw(reply);
+#if LENOXVI_BOARD_FLEX
+  } else if (strcmp(cmd, "set_mute") == 0) {
+    /* Software mic mute (flex 1.1.0, 2026-10-07): "mute": true|false,
+     * or omit for toggle. Echoes the resulting state so the dashboard
+     * renders truth from the ack, not optimistic UI. Flex-only for now:
+     * the array board's mute is its physical button (handled by the stock
+     * XMOS image); the bot's set_mute route 501s honestly on array. */
+    const cJSON *j_mute = cJSON_GetObjectItem(msg, "mute");
+    bool now;
+    if (j_mute == NULL || !cJSON_IsBool(j_mute)) {
+      now = pipecat_mic_mute_toggle();
+    } else {
+      now = pipecat_mic_mute_set(cJSON_IsTrue(j_mute));
+    }
+    char reply[160];
+    snprintf(reply, sizeof(reply),
+             "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\","
+             "\"cmd\":\"set_mute\",\"ok\":true,"
+             "\"data\":{\"muted\":%s}}",
+             now ? "true" : "false");
+    pipecat_rtvi_send_raw(reply);
+#endif
   } else if (strcmp(cmd, "set_name") == 0) {
     const cJSON *j_name = cJSON_GetObjectItem(msg, "name");
     if (!cJSON_IsString(j_name)) {

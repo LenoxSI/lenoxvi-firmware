@@ -1,16 +1,28 @@
 cmake_minimum_required(VERSION 3.19)
 
+# Board / firmware line (2026-10-16 branch fold): ONE source tree builds both
+# lines; the line is chosen per build and is REQUIRED — there is no default:
+#   idf.py -B build/array -DBOARD=array build    # XVF3800 mic-array board
+#   idf.py -B build/flex  -DBOARD=flex  build    # reSpeaker Flex
+# BOARD drives the image's whole identity: OTA track URL (/firmware/<board>/),
+# project name (<board>_esp32 — a node refuses an OTA image with another name,
+# fw M4) and the board-specific code paths (LENOXVI_BOARD_ARRAY/FLEX). Give each
+# board its own build dir (-B build/<board>) so a cached value can't leak.
+set(BOARD "" CACHE STRING "firmware line: array | flex")
+if(NOT BOARD STREQUAL "array" AND NOT BOARD STREQUAL "flex")
+  message(FATAL_ERROR "BOARD must be set: idf.py -B build/<board> -DBOARD=array|flex build (got '${BOARD}')")
+endif()
+add_compile_definitions(XVF_OTA_TRACK="${BOARD}")
+if(BOARD STREQUAL "array")
+  add_compile_definitions(LENOXVI_BOARD_ARRAY=1)
+else()
+  add_compile_definitions(LENOXVI_BOARD_FLEX=1)
+endif()
+
 if(NOT IDF_TARGET STREQUAL linux)
   if(NOT DEFINED ENV{WIFI_SSID} OR NOT DEFINED ENV{WIFI_PASSWORD})
     message(FATAL_ERROR "Env variables WIFI_SSID and WIFI_PASSWORD must be set")
   endif()
-
-  # Firmware line identity (2026-10-16): this branch IS the array line.
-  # XVF_OTA_TRACK routes OTA to /firmware/array/version; project() below names
-  # the image array_esp32 (the node refuses an OTA image with another name — fw
-  # M4). Hard-coded per branch, never env-driven: a stale CMake cache can't
-  # build one line's identity into the other.
-  add_compile_definitions(XVF_OTA_TRACK="array")
 
   add_compile_definitions(WIFI_SSID="$ENV{WIFI_SSID}")
   add_compile_definitions(WIFI_PASSWORD="$ENV{WIFI_PASSWORD}")
@@ -57,4 +69,4 @@ if(IDF_TARGET STREQUAL linux)
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(array_esp32 VERSION 1.2.9)
+project(${BOARD}_esp32 VERSION 1.2.10)

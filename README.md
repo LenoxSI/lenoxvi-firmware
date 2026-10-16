@@ -6,12 +6,14 @@ commands, LEDs and status) and updates itself over the air from the bot.
 
 ## Firmware lines
 
-Each supported board is its own **line**, with one name used everywhere:
+Each supported board is its own **line**, with one name used everywhere. All
+lines build from the `main` branch; the line is chosen per build with
+`-DBOARD`:
 
-| line  | board                               | branch          | image             | tags           |
-|-------|-------------------------------------|-----------------|-------------------|----------------|
-| array | reSpeaker XVF3800 mic array + ESP32-S3 | `array-xvf3800` | `array_esp32.bin` | `array-vX.Y.Z` |
-| flex  | reSpeaker Flex (XVF3800) + XIAO ESP32-S3 | `flex-xvf3800`  | `flex_esp32.bin`  | `flex-vX.Y.Z`  |
+| line  | board                                    | build flag     | image             | tags           |
+|-------|------------------------------------------|----------------|-------------------|----------------|
+| array | reSpeaker XVF3800 mic array + ESP32-S3   | `-DBOARD=array` | `array_esp32.bin` | `array-vX.Y.Z` |
+| flex  | reSpeaker Flex (XVF3800) + XIAO ESP32-S3 | `-DBOARD=flex`  | `flex_esp32.bin`  | `flex-vX.Y.Z`  |
 
 Never put one line's image on the other line's board. Since 1.2.9 a node
 refuses an over-the-air image whose project name isn't its own, and the bot
@@ -30,14 +32,17 @@ downloaded). The target (`esp32s3`) and every build option come from
 ```sh
 git clone https://github.com/LenoxSI/lenoxvi-firmware.git
 cd lenoxvi-firmware
-git checkout array-xvf3800          # or flex-xvf3800
 ./scripts/fetch_libpeer.sh          # libpeer, pinned + patched (patches/libpeer/)
 . "$IDF_PATH/export.sh"
 
 export PIPECAT_SMALLWEBRTC_URL="https://<bot-host>:7860/api/offer"
 export WIFI_SSID="" WIFI_PASSWORD=""   # empty: the node reads Wi-Fi from its NVS (normal)
-idf.py build                        # -> build/array_esp32.bin (or flex_esp32.bin)
+idf.py -B build/array -DBOARD=array build   # -> build/array/array_esp32.bin
+idf.py -B build/flex  -DBOARD=flex  build   # -> build/flex/flex_esp32.bin
 ```
+
+`BOARD` is required (the build stops without it). Use one build directory per
+board so a cached setting never carries over from one line to the other.
 
 Build environment variables:
 
@@ -67,9 +72,9 @@ Build environment variables:
 
 ## Versions
 
-The version is `project(<line>_esp32 VERSION X.Y.Z)` in `CMakeLists.txt` —
+The version is `project(${BOARD}_esp32 VERSION X.Y.Z)` in `CMakeLists.txt` —
 the node compares it with the bot's manifest and updates when the manifest is
-newer. Both lines share version numbers for the same changes.
+newer. Both lines build from the same source, so they share version numbers.
 
 ## Third-party code
 

@@ -51,7 +51,14 @@
 #define PCM_MONO_BYTES           (PCM_MONO_SAMPLES * 2)
 #define HW_STEREO32_BYTES        (PCM_MONO_SAMPLES * 2 * 4)
 #define I2S_READ_TIMEOUT_MS      100
-#define XVF_NATIVE_RATE          48000   /* bus rate the XMOS wants (16k bus wedges it: LEDs lock, zero audio) */
+/* Both boards run the XVF3800 as I2S clock MASTER with the ESP32 as slave at a
+ * 48k native bus (16k bus wedges it: LEDs lock, zero audio):
+ *   array — Seeed v1.0.8_48k master image
+ *   flex  — formatBCE inthost v1.0.7 image (2026-10-07: the stock Flex images
+ *           with the XIAO as clock master are a dead end — full-scale noise
+ *           on 48k AND 16k; the S3 can't host these clocks). Extraction below
+ *           is identical on both. */
+#define XVF_NATIVE_RATE          48000
 #define HW48_MONO_SAMPLES        960     /* 20ms @ 48k */
 #define HW48_STEREO32_BYTES      (HW48_MONO_SAMPLES * 2 * 4)   /* 7680 B / 20ms */
 
@@ -62,6 +69,19 @@ static i2s_chan_handle_t        rx_chan  = NULL;
 static i2s_std_config_t         g_std_cfg;    /* saved for full I2S re-init (heal) */
 static i2s_chan_config_t        g_chan_cfg;
 static std::atomic<bool>        is_playing = false;
+
+#if LENOXVI_BOARD_FLEX
+/* Software mic mute (flex 1.1.0, 2026-10-07): the Flex board has no
+ * physical Mute button — the array node's mute is board hardware. The
+ * dashboard's Mute button sends cmd "set_mute"; the zeroing happens in
+ * the exact same place the turn lock (is_playing) zeroes the mic, so
+ * the mute path is one atomic read + memset per frame. */
+static std::atomic<bool>        mic_mute = false;
+
+bool pipecat_mic_muted(void)        { return mic_mute.load(); }
+bool pipecat_mic_mute_set(bool m)   { mic_mute.store(m); return mic_mute.load(); }
+bool pipecat_mic_mute_toggle(void)  { mic_mute.store(!mic_mute.load()); return mic_mute.load(); }
+#endif
 
 static void update_is_playing(int16_t *buf, size_t n) {
     for (size_t i = 0; i < n; i++) {
@@ -379,7 +399,11 @@ void pipecat_init_audio_capture() {
     ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
 
+#if LENOXVI_BOARD_FLEX
+    ESP_LOGI(LOG_TAG, "Audio ready: FLEX XVF3800 I2S MASTER (inthost v1.0.7 image), ESP32 slave @ %d Hz", XVF_NATIVE_RATE);
+#else
     ESP_LOGI(LOG_TAG, "Audio ready: XVF3800 I2S MASTER (v1.0.8_48k image), ESP32 slave @ %d Hz", XVF_NATIVE_RATE);
+#endif
 
     /* XVF params are volatile (lost on XMOS power-cycle). NOTE (2026-09-19):
      * with the master image the XMOS drives its own clocks, so the old
@@ -525,6 +549,12 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
         diag_peak_lo = 0;
     }
     if (is_playing) { memset(mic_mono16, 0, PCM_MONO_BYTES); }
+#if LENOXVI_BOARD_FLEX
+    /* Software mute (flex 1.1.0): same zeroing as the turn lock — one
+     * atomic read; when muted the encoder sees silence (7-byte DTX
+     * frames on the wire). */
+    if (mic_mute.load()) { memset(mic_mono16, 0, PCM_MONO_BYTES); }
+#endif
     auto n = opus_encode(opus_encoder, (const opus_int16 *)mic_mono16,
                          PCM_MONO_SAMPLES, encoder_output_buffer, OPUS_BUFFER_SIZE);
     /* Encoder-side diag: what actually leaves the node. If mic peaks are

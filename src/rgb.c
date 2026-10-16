@@ -155,6 +155,14 @@ static void rgb_task(void *arg) {
 // ── Public API ────────────────────────────────────────────────
 
 void rgb_init(void) {
+#if LENOXVI_BOARD_FLEX
+    /* FLEX (2026-10-07): the reSpeaker Flex has NO LED ring — the XIAO
+     * footprint isn't wired to any pixels, and the XMOS LED servicer
+     * (resid 20) has nothing behind it on this board. Skipping the RGB
+     * task entirely; the flex node's state is visible via dashboard +
+     * serial. */
+    ESP_LOGI(TAG, "rgb: flex build — no LED ring on this board, task skipped");
+#else
     /* XMOS probe happens in media.cpp audio init — but rgb_init runs BEFORE
      * audio init (main.cpp boot order), and the XVF3800 servicer NACKs for
      * the first seconds after power-up. So: BOOT state is queued via the
@@ -166,6 +174,7 @@ void rgb_init(void) {
     rendered_state = RGB_STATE_DARK;
     BaseType_t ok = xTaskCreate(rgb_task, "rgb", 4096, NULL, 4, NULL);
     if (ok != pdPASS) ESP_LOGE(TAG, "rgb task spawn failed");
+#endif
 }
 
 void rgb_set_state(rgb_state_t new_state) {

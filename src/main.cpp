@@ -29,7 +29,6 @@ extern "C" void app_main(void) {
    * through the XMOS, so the bus must exist before those states fire.
    * (Audio/I2S init stays deferred to post-DTLS — heap ordering.) */
   pipecat_init_i2c_early();
-  pipecat_init_screen();
   peer_init();
   // OTA health gate (design note H1, 2026-10-13). This used to be a
   // boot-time mark-valid — which made rollback meaningless: every image
@@ -56,8 +55,6 @@ extern "C" void app_main(void) {
   // WebRTC init is deferred to the first IP_EVENT_STA_GOT_IP (see wifi.cpp) —
   // starting it before the network stack allocates exhausts the heap and
   // kills the DTLS certificate setup.
-
-  pipecat_screen_system_log("Pipecat ESP32 client initialized\n");
 
   while (1) {
     pipecat_webrtc_loop();
