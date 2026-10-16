@@ -5,6 +5,13 @@ if(NOT IDF_TARGET STREQUAL linux)
     message(FATAL_ERROR "Env variables WIFI_SSID and WIFI_PASSWORD must be set")
   endif()
 
+  # Firmware line identity (2026-10-16): this branch IS the array line.
+  # XVF_OTA_TRACK routes OTA to /firmware/array/version; project() below names
+  # the image array_esp32 (the node refuses an OTA image with another name — fw
+  # M4). Hard-coded per branch, never env-driven: a stale CMake cache can't
+  # build one line's identity into the other.
+  add_compile_definitions(XVF_OTA_TRACK="array")
+
   add_compile_definitions(WIFI_SSID="$ENV{WIFI_SSID}")
   add_compile_definitions(WIFI_PASSWORD="$ENV{WIFI_PASSWORD}")
 endif()
@@ -50,4 +57,4 @@ if(IDF_TARGET STREQUAL linux)
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(node_esp32 VERSION 1.2.8)
+project(array_esp32 VERSION 1.2.9)
