@@ -254,7 +254,7 @@ extern "C" void pipecat_mute_hw_diag(int *btn) { *btn = s_dbg_btn; }
  * 100 ms timeout + 20 ms gap — one failed read could blind the poll for
  * ~0.5 s, and with 15-30% of reads failing, quick taps fell into those gaps
  * (only long holds were caught; live test 2026-10-16 18:50). Here a failed
- * read costs one tick. Busy/odd status = unknown, never a level.
+ * read costs at most one 100 ms timeout, never sleep-retries. Busy/odd status = unknown, never a level.
  * Diag (get_info mute_hw.btn): 1/0 level, -1 bus error, -2 WAIT x5,
  * -100-N servicer status N. */
 static int xvf_button_read_once(void) {
@@ -265,8 +265,11 @@ static int xvf_button_read_once(void) {
      * moment later (1.2.16's single attempt failed 100%) — re-ask fast. */
     for (int attempt = 0; attempt < 5; attempt++) {
         if (attempt) esp_rom_delay_us(2000);
+        /* XVF_CONTROL_TIMEOUT_MS (100): the XMOS clock-stretches while it
+         * prepares an answer — 1.2.16/1.2.17 used 30 ms and every read
+         * timed out (diag -1, 100%). */
         if (i2c_master_transmit_receive(xvf3800, req, sizeof(req), resp, sizeof(resp),
-                                        pdMS_TO_TICKS(30)) != ESP_OK) return -1;   /* bus error */
+                                        pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS)) != ESP_OK) return -1;   /* bus error */
         if (resp[0] == XVF_CTRL_DONE) return (resp[1] >> XVF_GPI_BUTTON_BIT) & 1;
         if (resp[0] != XVF_CTRL_WAIT) return -100 - resp[0];   /* other status (diag) */
     }
@@ -276,7 +279,7 @@ static int xvf_button_read_once(void) {
 static bool xvf_mute_pin_write_once(bool on) {
     if (xvf3800 == NULL) return false;
     uint8_t p[5] = {XVF_RESID_GPO, XVF_CMD_GPO_WRITE_VALUE, 2, XVF_GPO_MUTE_PIN, (uint8_t)(on ? 1 : 0)};
-    return i2c_master_transmit(xvf3800, p, sizeof(p), pdMS_TO_TICKS(30)) == ESP_OK;
+    return i2c_master_transmit(xvf3800, p, sizeof(p), pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS)) == ESP_OK;
 }
 
 static void mute_task(void *arg) {
