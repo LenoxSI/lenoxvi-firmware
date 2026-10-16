@@ -79,7 +79,7 @@ static std::atomic<bool>        is_playing = false;
  *   - ARRAY: the board's physical Mute button and this state are the SAME
  *     thing — XMOS GPO pin X0D30 ("mute LED + mic mute control, high =
  *     mute", Seeed wiki). A software set writes X0D30 (red LED on, XMOS
- *     mutes the mics); xvf_mute_service() polls X0D30 from the LED task and
+ *     mutes the mics); a small mute task (array) watches the button and
  *     adopts a button press (saved + pushed to the bot as mute_push).
  *   - FLEX: no button — the software state is the whole story.
  * mute_seq bumps on every software set, so a poll whose read raced a set
@@ -215,9 +215,9 @@ extern "C" esp_err_t xvf_led_write(uint8_t cmd, const uint8_t *payload, size_t l
 
 static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd, uint8_t *out, size_t out_len);
 
-/* Array mute sync (H4): called from the LED task's loop on every tick (array
- * only — flex has no button and no LED task). GPO servicer (resid 20)
- * WRITE_VALUE (cmd 1) payload {pin, level} drives X0D30 = mute + red LED. */
+/* Array mute sync (H4): GPO servicer (resid 20) WRITE_VALUE (cmd 1) payload
+ * {pin, level} drives X0D30 = mute + red LED (array only; flex has no
+ * button). */
 #define XVF_RESID_GPO            20
 #define XVF_CMD_GPO_WRITE_VALUE   1
 #define XVF_GPO_MUTE_PIN         30
@@ -240,42 +240,76 @@ static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd, uint8_t *out, size_t
 static volatile int s_dbg_btn = -1;
 extern "C" void pipecat_mute_hw_diag(int *btn) { *btn = s_dbg_btn; }
 
-extern "C" void xvf_mute_service(void) {
 #if LENOXVI_BOARD_ARRAY
-    static int stable = 1;        /* debounced button: 1 released, 0 pressed */
-    static int pending = -1;      /* candidate level awaiting a second read */
-    if (!xvf_bus_ready) return;
-    if (mute_hw_dirty.load()) {
-        uint32_t seq = mute_seq.load();
-        bool want = mic_mute.load();
-        uint8_t p[2] = {XVF_GPO_MUTE_PIN, (uint8_t)(want ? 1 : 0)};
-        if (xvf_write_bytes(XVF_RESID_GPO, XVF_CMD_GPO_WRITE_VALUE, p, 2) == ESP_OK
-            && mute_seq.load() == seq) {
-            mute_hw_dirty.store(false);
-            ESP_LOGI(LOG_TAG, "mute: X0D30 <- %d (%s)", want ? 1 : 0, want ? "muted" : "unmuted");
+/* Own task (1.2.15): the button poll used to ride the LED task, whose loop
+ * stalls for 100-1000 ms while it renders (wake/listen/speak states) — quick
+ * presses during a stall were missed and the LED drifted from the node's
+ * state (live stress test, 2026-10-16 18:35). Internal-RAM stack
+ * (xTaskCreate) so the NVS save on a press is safe. */
+#define MUTE_POLL_MS            25
+#define MUTE_REASSERT_MS      1000   /* "the LED never lies": idle re-sync period */
+static void mute_task(void *arg) {
+    int stable = 1;               /* debounced button: 1 released, 0 pressed */
+    int pending = -1;             /* candidate level awaiting a second good read */
+    TickType_t last_assert = xTaskGetTickCount();
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(MUTE_POLL_MS));
+        /* Write the pin when the state changed — and, while the button is
+         * idle, re-assert it every second: if the XMOS ever toggled on a
+         * press we missed, the LED snaps back to the node's (= dashboard's)
+         * state within a second instead of lying until the next action. */
+        TickType_t now = xTaskGetTickCount();
+        bool reassert = stable == 1 && pending == -1
+                        && (now - last_assert) >= pdMS_TO_TICKS(MUTE_REASSERT_MS);
+        if (mute_hw_dirty.load() || reassert) {
+            uint32_t seq = mute_seq.load();
+            bool want = mic_mute.load();
+            uint8_t p[2] = {XVF_GPO_MUTE_PIN, (uint8_t)(want ? 1 : 0)};
+            if (xvf_write_bytes(XVF_RESID_GPO, XVF_CMD_GPO_WRITE_VALUE, p, 2) == ESP_OK) {
+                last_assert = now;
+                if (mute_hw_dirty.load() && mute_seq.load() == seq) {
+                    mute_hw_dirty.store(false);
+                    ESP_LOGI(LOG_TAG, "mute: X0D30 <- %d (%s)", want ? 1 : 0, want ? "muted" : "unmuted");
+                }
+            }
+            continue;
         }
-        return;
+        uint8_t io[4] = {0};
+        if (xvf_read_bytes(XVF_RESID_IO_CONFIG, XVF_CMD_GPI_VALUE_ALL, io, sizeof(io)) != ESP_OK) {
+            s_dbg_btn = -1;
+            continue;             /* unknown: neither edge, pending kept */
+        }
+        int level = (io[0] >> XVF_GPI_BUTTON_BIT) & 1;
+        s_dbg_btn = level;
+        if (level == stable) { pending = -1; continue; }
+        if (pending != level) { pending = level; continue; }   /* confirm on the next good read */
+        stable = level;
+        pending = -1;
+        if (level == 0) {         /* press */
+            mute_seq.fetch_add(1);
+            bool m = !mic_mute.load();
+            mic_mute.store(m);
+            settings_set_muted(m);   /* safe: this task's stack is internal RAM */
+            mute_push_pending.store(true);
+            ESP_LOGI(LOG_TAG, "mute: physical button -> %s", m ? "MUTED" : "unmuted");
+        } else {                  /* release: make the pin agree with us now */
+            mute_hw_dirty.store(true);
+        }
     }
-    uint8_t io[4] = {0};
-    if (xvf_read_bytes(XVF_RESID_IO_CONFIG, XVF_CMD_GPI_VALUE_ALL, io, sizeof(io)) != ESP_OK) {
-        s_dbg_btn = -1;
-        return;   /* unknown: neither edge */
-    }
-    int level = (io[0] >> XVF_GPI_BUTTON_BIT) & 1;
-    s_dbg_btn = level;
-    if (level == stable) { pending = -1; return; }
-    if (pending != level) { pending = level; return; }   /* first sighting: confirm next read */
-    stable = level;
-    pending = -1;
-    if (level == 0) {             /* press */
-        mute_seq.fetch_add(1);
-        bool now = !mic_mute.load();
-        mic_mute.store(now);
-        settings_set_muted(now);  /* safe HERE: the LED task's stack is internal RAM (xTaskCreate) */
-        mute_push_pending.store(true);
-        ESP_LOGI(LOG_TAG, "mute: physical button -> %s", now ? "MUTED" : "unmuted");
-    } else {                      /* release: make the pin agree with us */
-        mute_hw_dirty.store(true);
+}
+#endif
+
+/* Start the array's mute task once the XVF control bus exists (called right
+ * after the bus-ready flag is set in audio init). No-op on flex. */
+static void mute_task_start(void) {
+#if LENOXVI_BOARD_ARRAY
+    static bool started = false;
+    if (started) return;
+    if (xTaskCreate(mute_task, "mute", 4096, NULL, 5, NULL) == pdPASS) {
+        started = true;
+        ESP_LOGI(LOG_TAG, "mute: button task started (poll %d ms)", MUTE_POLL_MS);
+    } else {
+        ESP_LOGE(LOG_TAG, "mute: button task spawn failed — physical button won't sync");
     }
 #endif
 }
@@ -410,6 +444,7 @@ void pipecat_init_i2c_early() {
         if (alive) {
             ESP_LOGI(LOG_TAG, "XVF3800 detected @ 0x%02x (early)", XVF3800_ADDR);
             xvf_bus_ready = true;  /* unblock the rgb task's early-state flush */
+            mute_task_start();     /* H4: physical button <-> mute state (array) */
         } else {
             ESP_LOGE(LOG_TAG, "XVF3800 NOT responding @ 0x%02x!", XVF3800_ADDR);
             i2c_master_bus_rm_device(xvf3800);
