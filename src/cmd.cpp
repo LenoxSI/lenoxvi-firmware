@@ -172,6 +172,9 @@ static void do_scan(void) {
 void cmd_push_firmware_version(void) {
   const esp_app_desc_t *app_desc = esp_app_get_description();
   char reply[256];
+  /* "line" (1.2.19): the board line this image was built for — the same
+   * compiled-in XVF_OTA_TRACK the OTA board guard uses ("array"|"flex"),
+   * so the dashboard can label each node's hardware. */
   /* if the bootloader rolled back from a version, say which —
    * "rejected" rides alongside "fw" (the bot ignores unknown keys today;
    * it's there so a silent rollback can be surfaced). Version strings come
@@ -180,13 +183,13 @@ void cmd_push_firmware_version(void) {
   if (pipecat_ota_rejected_version(rejected, sizeof(rejected))) {
     snprintf(reply, sizeof(reply),
              "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
-             "\"ok\":true,\"data\":{\"fw\":\"%s\",\"rejected\":\"%s\",\"muted\":%s}}",
-             app_desc->version, rejected, pipecat_mic_muted() ? "true" : "false");
+             "\"ok\":true,\"data\":{\"fw\":\"%s\",\"line\":\"%s\",\"rejected\":\"%s\",\"muted\":%s}}",
+             app_desc->version, XVF_OTA_TRACK, rejected, pipecat_mic_muted() ? "true" : "false");
   } else {
     snprintf(reply, sizeof(reply),
              "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
-             "\"ok\":true,\"data\":{\"fw\":\"%s\",\"muted\":%s}}",
-             app_desc->version, pipecat_mic_muted() ? "true" : "false");
+             "\"ok\":true,\"data\":{\"fw\":\"%s\",\"line\":\"%s\",\"muted\":%s}}",
+             app_desc->version, XVF_OTA_TRACK, pipecat_mic_muted() ? "true" : "false");
   }
   pipecat_rtvi_send_raw(reply);
   ESP_LOGI(TAG, "fw_push: sent running version %s", app_desc->version);
@@ -231,9 +234,9 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     snprintf(reply, sizeof(reply),
              "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"get_info\","
              "\"ok\":true,\"data\":{\"name\":\"%s\",\"mac\":\"%02x%02x%02x%02x%02x%02x\","
-             "\"fw\":\"%s\",\"muted\":%s,\"mute_hw\":{\"btn\":%d}}}",
+             "\"fw\":\"%s\",\"line\":\"%s\",\"muted\":%s,\"mute_hw\":{\"btn\":%d}}}",
              settings_get_node_name(), mac[0], mac[1], mac[2], mac[3],
-             mac[4], mac[5], esp_app_get_description()->version,
+             mac[4], mac[5], esp_app_get_description()->version, XVF_OTA_TRACK,
              pipecat_mic_muted() ? "true" : "false", dbg_btn);
     pipecat_rtvi_send_raw(reply);
   } else if (strcmp(cmd, "set_mute") == 0) {
