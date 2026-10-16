@@ -16,7 +16,7 @@ CONFIG_MBEDTLS_SSL_PROTO_DTLS=y
 # node only spoke 1.2 — the OTA version check died -0x4290 (handshake
 # failure) on every boot (2026-09-19). WebRTC/DTLS paths unaffected
 # (DTLS pinned to 1.2 in libpeer — see patches/libpeer-dtls-1.2-pin.md).
-CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
+# CONFIG_MBEDTLS_SSL_PROTO_TLS1_3 is not set
 
 # mbedtls allocations from PSRAM (2026-09-19): with WiFi + WebRTC +
 # audio DMA live, the largest contiguous INTERNAL free block is ~20KB —

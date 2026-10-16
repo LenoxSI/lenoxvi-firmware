@@ -4,10 +4,12 @@ build/
 # Managed components (pulled from dependencies.lock via idf_component.yml)
 managed_components/
 
-# Vendored third-party deps (have their own .git; re-fetch on fresh clone)
-components/esp-libopus/
+# Third-party deps. components/srtp (libsrtp, BSD) and components/esp-libopus
+# (Opus, BSD) are VENDORED — committed as-is from the upstream reference
+# firmware, licenses inside. deps/libpeer is fetched + patched by
+# scripts/fetch_libpeer.sh. components/esp-protocols is only for the
+# IDF_TARGET=linux host build (not used for the device).
 components/esp-protocols/
-components/srtp/
 deps/libpeer/
 
 # Generated sdkconfig (sdkconfig.defaults is the tracked source of truth)
