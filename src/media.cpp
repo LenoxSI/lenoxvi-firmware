@@ -246,11 +246,33 @@ extern "C" void pipecat_mute_hw_diag(int *btn) { *btn = s_dbg_btn; }
  * presses during a stall were missed and the LED drifted from the node's
  * state (live stress test, 2026-10-16 18:35). Internal-RAM stack
  * (xTaskCreate) so the NVS save on a press is safe. */
-#define MUTE_POLL_MS            25
+#define MUTE_POLL_MS            20
 #define MUTE_REASSERT_MS      1000   /* "the LED never lies": idle re-sync period */
+/* One-shot button read for the poll (1.2.16): a single combined transaction
+ * with a short timeout and NO retry sleeps. xvf_read_bytes retries 4x with a
+ * 100 ms timeout + 20 ms gap — one failed read could blind the poll for
+ * ~0.5 s, and with 15-30% of reads failing, quick taps fell into those gaps
+ * (only long holds were caught; live test 2026-10-16 18:50). Here a failed
+ * read costs one tick. Busy/odd status = unknown, never a level. */
+static int xvf_button_read_once(void) {
+    if (xvf3800 == NULL) return -1;
+    uint8_t req[3] = {XVF_RESID_IO_CONFIG, (uint8_t)(XVF_CMD_GPI_VALUE_ALL | XVF_READ_BIT), 4 + 1};
+    uint8_t resp[5] = {0};
+    if (i2c_master_transmit_receive(xvf3800, req, sizeof(req), resp, sizeof(resp),
+                                    pdMS_TO_TICKS(30)) != ESP_OK) return -1;
+    if (resp[0] != XVF_CTRL_DONE) return -1;
+    return (resp[1] >> XVF_GPI_BUTTON_BIT) & 1;
+}
+
+static bool xvf_mute_pin_write_once(bool on) {
+    if (xvf3800 == NULL) return false;
+    uint8_t p[5] = {XVF_RESID_GPO, XVF_CMD_GPO_WRITE_VALUE, 2, XVF_GPO_MUTE_PIN, (uint8_t)(on ? 1 : 0)};
+    return i2c_master_transmit(xvf3800, p, sizeof(p), pdMS_TO_TICKS(30)) == ESP_OK;
+}
+
 static void mute_task(void *arg) {
     int stable = 1;               /* debounced button: 1 released, 0 pressed */
-    int pending = -1;             /* candidate level awaiting a second good read */
+    int pending = -1;             /* release candidate awaiting a second good read */
     TickType_t last_assert = xTaskGetTickCount();
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(MUTE_POLL_MS));
@@ -262,27 +284,27 @@ static void mute_task(void *arg) {
         bool reassert = stable == 1 && pending == -1
                         && (now - last_assert) >= pdMS_TO_TICKS(MUTE_REASSERT_MS);
         if (mute_hw_dirty.load() || reassert) {
+            /* One-shot write (no retry sleeps — a slow failing write would
+             * blind the poll). A failed state change retries next tick; a
+             * failed idle re-assert waits for its next period. */
             uint32_t seq = mute_seq.load();
             bool want = mic_mute.load();
-            uint8_t p[2] = {XVF_GPO_MUTE_PIN, (uint8_t)(want ? 1 : 0)};
-            if (xvf_write_bytes(XVF_RESID_GPO, XVF_CMD_GPO_WRITE_VALUE, p, 2) == ESP_OK) {
-                last_assert = now;
-                if (mute_hw_dirty.load() && mute_seq.load() == seq) {
-                    mute_hw_dirty.store(false);
-                    ESP_LOGI(LOG_TAG, "mute: X0D30 <- %d (%s)", want ? 1 : 0, want ? "muted" : "unmuted");
-                }
+            bool ok = xvf_mute_pin_write_once(want);
+            last_assert = now;
+            if (ok && mute_hw_dirty.load() && mute_seq.load() == seq) {
+                mute_hw_dirty.store(false);
+                ESP_LOGI(LOG_TAG, "mute: X0D30 <- %d (%s)", want ? 1 : 0, want ? "muted" : "unmuted");
             }
             continue;
         }
-        uint8_t io[4] = {0};
-        if (xvf_read_bytes(XVF_RESID_IO_CONFIG, XVF_CMD_GPI_VALUE_ALL, io, sizeof(io)) != ESP_OK) {
-            s_dbg_btn = -1;
-            continue;             /* unknown: neither edge, pending kept */
-        }
-        int level = (io[0] >> XVF_GPI_BUTTON_BIT) & 1;
+        int level = xvf_button_read_once();
         s_dbg_btn = level;
+        if (level < 0) continue;  /* unknown: neither edge, pending kept */
         if (level == stable) { pending = -1; continue; }
-        if (pending != level) { pending = level; continue; }   /* confirm on the next good read */
+        /* Press: ONE good read (a quick tap may give only one; good reads
+         * never showed a false press in ~1,000 live samples). Release: two
+         * — it only triggers the pin re-sync, so there's no hurry. */
+        if (level == 1 && pending != 1) { pending = 1; continue; }
         stable = level;
         pending = -1;
         if (level == 0) {         /* press */
