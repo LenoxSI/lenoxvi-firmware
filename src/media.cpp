@@ -282,7 +282,7 @@ static bool xvf_mute_pin_write_once(bool on) {
     return i2c_master_transmit(xvf3800, p, sizeof(p), pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS)) == ESP_OK;
 }
 
-#define MUTE_SETTLE_MS        1500   /* let the XMOS settle before the first ask */
+#define MUTE_SETTLE_MS         500   /* short breather after the DSP profile */
 static void mute_task(void *arg) {
     /* Debounced button: 1 released, 0 pressed, -1 UNKNOWN (1.2.21). The
      * task used to assume "released" at start, so a bogus 0 on the first
@@ -330,10 +330,12 @@ static void mute_task(void *arg) {
             continue;
         }
         if (level == stable) { pending = -1; continue; }
-        /* Press: ONE good read (a quick tap may give only one; good reads
-         * never showed a false press in ~1,000 live samples). Release: two
-         * — it only triggers the pin re-sync, so there's no hurry. */
-        if (level == 1 && pending != 1) { pending = 1; continue; }
+        /* Both edges need TWO good reads of the new level with no good read
+         * of the old level between them (failed reads in the gap are fine).
+         * 1.2.16-1.2.21 took a press on ONE read — and a stray empty read
+         * (concurrent XMOS traffic) became a phantom press. Reads are cheap
+         * now (one-shot, 20 ms), so a real tap still gives several. */
+        if (pending != level) { pending = level; continue; }
         stable = level;
         pending = -1;
         if (level == 0) {         /* press */
@@ -350,8 +352,8 @@ static void mute_task(void *arg) {
 }
 #endif
 
-/* Start the array's mute task once the XVF control bus exists (called right
- * after the bus-ready flag is set in audio init). No-op on flex. */
+/* Start the array's mute task (called at the END of audio init, after the
+ * DSP profile — see there). No-op on flex. */
 static void mute_task_start(void) {
 #if LENOXVI_BOARD_ARRAY
     static bool started = false;
@@ -495,7 +497,6 @@ void pipecat_init_i2c_early() {
         if (alive) {
             ESP_LOGI(LOG_TAG, "XVF3800 detected @ 0x%02x (early)", XVF3800_ADDR);
             xvf_bus_ready = true;  /* unblock the rgb task's early-state flush */
-            mute_task_start();     /* H4: physical button <-> mute state (array) */
         } else {
             ESP_LOGE(LOG_TAG, "XVF3800 NOT responding @ 0x%02x!", XVF3800_ADDR);
             i2c_master_bus_rm_device(xvf3800);
@@ -601,6 +602,12 @@ void pipecat_init_audio_capture() {
 #else
     ESP_LOGW(LOG_TAG, "XVF3800 DSP profile SKIPPED (A/B: XVF_APPLY_PROFILE=0)");
 #endif
+    /* H4: physical button <-> mute state (array). Started AFTER the DSP
+     * profile (1.2.22): a button read squeezed between the profile's writes
+     * came back "OK" with an empty payload = a phantom press that un-muted
+     * a muted node at boot (live 2026-10-16 20:05:27 / 20:27:48 / 20:35:13;
+     * 1.2.21's 1.5 s settle was a guess and lost the race). */
+    mute_task_start();
 }
 
 /* ── Opus decoder — incoming bot audio (decoded for turn-lock only) ─────── */
