@@ -22,6 +22,10 @@ extern "C" void app_main(void) {
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   rgb_init();
   settings_load();  /* NVS name + wifi creds; bakes become fallbacks */
+  /* M1 (1.2.23): a pending Wi-Fi change trial counts this boot as an
+   * attempt (or rolls back to the previous network) BEFORE Wi-Fi starts —
+   * main task, internal-RAM stack, so the NVS write is safe. */
+  settings_wifi_trial_boot();
   pipecat_mic_mute_init();  /* H4: a muted node boots muted */
   /* Hostname follows the node name (UniFi shows it); sta netif exists
    * after esp_netif_init inside pipecat_init_wifi — set it from the
@@ -48,6 +52,7 @@ extern "C" void app_main(void) {
   // runs first (measured: largest block 25.6KB with I2S-first vs enough when
   // DTLS allocates first). The audio task starts on CONNECTED anyway.
   pipecat_init_wifi();
+  pipecat_wifi_trial_start();   /* M1: no-op unless this boot is a trial attempt */
 
   // OTA check now runs from the got-ip event handler (wifi.cpp) — running
   // it here raced the network AND failed TLS allocation before the heap

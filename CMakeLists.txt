@@ -69,4 +69,4 @@ if(IDF_TARGET STREQUAL linux)
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(${BOARD}_esp32 VERSION 1.2.22)
+project(${BOARD}_esp32 VERSION 1.2.23)

@@ -31,6 +31,17 @@ const char *settings_get_wifi_pass(void);
 int settings_set_node_name(const char *name);   /* trimmed, [A-Za-z0-9_-]{1,31} */
 int settings_set_wifi(const char *ssid, const char *password);
 
+/* Wi-Fi change trial (M1, 1.2.23 — see wifi_trial.h). begin: previous =
+ * current, current = new, trial = 1, one commit (caller then reboots).
+ * trial_boot: call once at boot after settings_load, before Wi-Fi starts —
+ * counts the attempt or rolls back; returns a wifi_trial_action_t.
+ * trial_passed: the bot answered on the new network — clear the trial.
+ * All write NVS: call from an internal-RAM stack (never the RTVI task). */
+int settings_begin_wifi_trial(const char *ssid, const char *password);
+int settings_wifi_trial_boot(void);
+bool settings_wifi_trial_pending(void);
+int settings_wifi_trial_passed(void);
+
 /* Mic mute (H4, 2026-10-16): persisted so a muted node stays muted across
  * reboots and OTA. Unset = unmuted. */
 bool settings_get_muted(void);

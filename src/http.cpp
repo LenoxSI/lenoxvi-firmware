@@ -127,6 +127,10 @@ void pipecat_http_request(char *offer, char *answer) {
 #endif
   }
 
+  /* M1: the bot answered on this network — a pending Wi-Fi trial passes
+   * (flag only: this runs on a libpeer callback task, no NVS here). */
+  pipecat_wifi_bot_reached();
+
   cJSON *j_response = cJSON_Parse((const char *)answer);
   if (j_response == NULL) {
     ESP_LOGE(LOG_TAG, "Error parsing HTTP response");

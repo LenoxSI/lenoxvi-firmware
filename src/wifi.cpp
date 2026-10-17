@@ -39,27 +39,50 @@ void pipecat_start_webrtc() {
   ESP_LOGI(LOG_TAG, "WebRTC init task spawned");
 }
 
-/* 1.1.1 (2026-10-03): push CURRENT settings (NVS is the truth) into the
- * WiFi driver's runtime config. Without this, set_wifi's NVS write is
- * invisible to esp_wifi_connect() — the driver keeps the boot-time
- * config, re-associates with the OLD password, and the verify step
- * reports "connected" without ever testing the new creds (measured live
- * 2026-10-03 12:52: wrong password acked connected in 1.2s, zero
- * failures, rollback unreachable). Call BEFORE any reconnect that
- * should use fresh creds — set_wifi apply and the rollback restore. */
-void pipecat_wifi_apply_runtime_config(void) {
-  wifi_config_t wifi_config;
-  memset(&wifi_config, 0, sizeof(wifi_config));
-  strncpy((char *)wifi_config.sta.ssid, settings_get_wifi_ssid(),
-          sizeof(wifi_config.sta.ssid));
-  strncpy((char *)wifi_config.sta.password, settings_get_wifi_pass(),
-          sizeof(wifi_config.sta.password));
-  wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-  wifi_config.sta.pmf_cfg.capable    = true;
-  wifi_config.sta.pmf_cfg.required   = false;
-  esp_err_t err = esp_wifi_set_config(
-      static_cast<wifi_interface_t>(ESP_IF_WIFI_STA), &wifi_config);
-  ESP_LOGW(LOG_TAG, "runtime wifi config push (ssid set, rc=%d)", err);
+/* ── Wi-Fi change trial (M1, 1.2.23) ─────────────────────────────────
+ * Started at boot ONLY while a trial is pending (settings_wifi_trial_boot
+ * decided this boot is an attempt). The offer POST's HTTP 200 (http.cpp)
+ * raises g_bot_reached — that callback runs on a libpeer task whose stack we
+ * don't control, so it only sets a flag; this task (internal-RAM stack,
+ * xTaskCreate) does the NVS write. No answer within WIFI_TRIAL_TIMEOUT_MS
+ * (wrong password, wrong network, bot unreachable) = reboot: the next boot
+ * counts the next attempt, and after the last one the old network returns. */
+#define WIFI_TRIAL_TIMEOUT_MS 90000
+static volatile bool g_bot_reached = false;
+
+void pipecat_wifi_bot_reached(void) { g_bot_reached = true; }
+
+static void wifi_trial_task(void *arg) {
+  const TickType_t start = xTaskGetTickCount();
+  while (!g_bot_reached) {
+    if (xTaskGetTickCount() - start >= pdMS_TO_TICKS(WIFI_TRIAL_TIMEOUT_MS)) {
+      if (pipecat_ota_busy()) {           /* never reboot under a flash write */
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        continue;
+      }
+      ESP_LOGE(LOG_TAG, "wifi trial: bot not reached within %d s — rebooting (next attempt)",
+               WIFI_TRIAL_TIMEOUT_MS / 1000);
+      vTaskDelay(pdMS_TO_TICKS(200));
+      esp_restart();
+    }
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+  if (settings_wifi_trial_passed() != 0) {
+    /* Should not happen (internal stack). If it does, the counter is still
+     * set and a later reboot would roll back good creds — say so loudly. */
+    ESP_LOGE(LOG_TAG, "wifi trial: bot reached but clearing the trial FAILED");
+  }
+  vTaskDelete(NULL);
+}
+
+void pipecat_wifi_trial_start(void) {
+  if (!settings_wifi_trial_pending()) return;
+  if (xTaskCreate(wifi_trial_task, "wifi_trial", 4096, NULL, 4, NULL) != pdPASS) {
+    ESP_LOGE(LOG_TAG, "wifi trial: task spawn failed — rebooting to retry");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+  }
+  ESP_LOGW(LOG_TAG, "wifi trial: waiting up to %d s for the bot", WIFI_TRIAL_TIMEOUT_MS / 1000);
 }
 
 static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
@@ -78,14 +101,12 @@ static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
     esp_wifi_connect();
     s_retry_num++;
     ESP_LOGI(LOG_TAG, "retrying connect (attempt %d)", s_retry_num);
-    cmd_wifi_on_disconnected();  // set_wifi verify/rollback hook
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
     ESP_LOGI(LOG_TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
     g_wifi_connected = true;
     s_retry_num = 0;  // reset retry counter on successful connection
     rgb_set_state(RGB_STATE_WIFI_UP);
-    cmd_wifi_on_connected();  // set_wifi verify/rollback hook
     // OTA check does NOT run here (empirical bisect 2026-09-19): the same
     // version GET that works at CONNECTED (build 47: 200 OK, update found)
     // crashes deterministically at got-ip time. It runs from the CONNECTED

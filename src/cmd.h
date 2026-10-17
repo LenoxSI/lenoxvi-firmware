@@ -18,10 +18,6 @@ void cmd_liveness_start(void);
 /* Mark session-alive (pong or any bot traffic seen). */
 void cmd_note_activity(void);
 
-/* Verify/rollback hooks called from the WiFi event handler. */
-void cmd_wifi_on_connected(void);
-void cmd_wifi_on_disconnected(void);
-
 /* Small reply helper used across cmd.cpp. */
 void cmd_send_simple(const char *cmd, bool ok, const char *note);
 

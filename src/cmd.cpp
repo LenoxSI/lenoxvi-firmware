@@ -54,7 +54,7 @@ void cmd_send_simple(const char *cmd, bool ok, const char *note) {
  * short-lived task on a static internal stack. One slot is safe —
  * the RTVI task serializes commands (same pattern as liveness). */
 typedef struct {
-  int kind;  /* 0 = set_name, 1 = set_wifi, 2 = mute (a != NULL = muted) */
+  int kind;  /* 0 = set_name, 1 = set_wifi (starts a trial), 2 = mute (a != NULL = muted) */
   const char *a, *b;
   int rc;
 } nvs_job_t;
@@ -65,7 +65,7 @@ static SemaphoreHandle_t s_job_done;
 static void nvs_job_task(void *arg) {
   nvs_job_t *job = (nvs_job_t *)arg;
   job->rc = job->kind == 0 ? settings_set_node_name(job->a)
-          : job->kind == 1 ? settings_set_wifi(job->a, job->b)
+          : job->kind == 1 ? settings_begin_wifi_trial(job->a, job->b)
                            : settings_set_muted(job->a != NULL);
   xSemaphoreGive(s_job_done);
   vTaskDelete(NULL);
@@ -85,36 +85,6 @@ static int nvs_run(int kind, const char *a, const char *b) {
   if (th == NULL) return -102;
   xSemaphoreTake(s_job_done, portMAX_DELAY);
   return s_job.rc;
-}
-
-/* Pending Wi-Fi change: apply → verify → rollback (design note flow —
- * a typo from the dashboard must never cost a trip to the node). */
-static bool s_wifi_pending = false;
-static char s_old_ssid[33] = "";
-static char s_old_pass[64] = "";
-static int s_wifi_failures = 0;
-
-void cmd_wifi_on_connected(void) {
-  if (s_wifi_pending) {
-    s_wifi_pending = false;
-    ESP_LOGI(TAG, "new wifi creds VERIFIED (got ip)");
-    cmd_send_simple("set_wifi", true, "connected");
-  }
-}
-
-void cmd_wifi_on_disconnected(void) {
-  if (!s_wifi_pending) return;
-  if (++s_wifi_failures >= 3) {
-    ESP_LOGW(TAG, "new wifi creds FAILED 3x — rolling back");
-    settings_set_wifi(s_old_ssid, s_old_pass);
-    /* 1.1.1: restore the OLD creds into the driver too, or the rollback
-     * has the same stale-config bug in reverse — the NVS restore would
-     * be invisible to the next esp_wifi_connect(). */
-    pipecat_wifi_apply_runtime_config();
-    s_wifi_pending = false;
-    s_wifi_failures = 0;
-    cmd_send_simple("set_wifi", false, "rollback: could not connect");
-  }
 }
 
 static void do_scan(void) {
@@ -299,26 +269,22 @@ bool pipecat_cmd_handle(const cJSON *msg) {
   } else if (strcmp(cmd, "scan") == 0) {
     do_scan();
   } else if (strcmp(cmd, "set_wifi") == 0) {
+    /* M1 (1.2.23): a Wi-Fi change is a TRIAL that survives reboots — store
+     * previous + new + trial=1 in one NVS commit, ack, reboot. The boot path
+     * verifies by REACHING THE BOT (offer POST 200, not just an IP) and rolls
+     * back to the previous network after 3 failed boots (wifi_trial.h). The
+     * old flow kept the previous creds in RAM and called "got an IP"
+     * success — a guest network/VLAN stranded the node in a reboot loop. */
     const cJSON *j_ssid = cJSON_GetObjectItem(msg, "ssid");
     const cJSON *j_pass = cJSON_GetObjectItem(msg, "pass");
-    if (!cJSON_IsString(j_ssid) || !cJSON_IsString(j_pass)) {
+    if (!cJSON_IsString(j_ssid) || !cJSON_IsString(j_pass) || !j_ssid->valuestring[0]) {
       cmd_send_simple("set_wifi", false, "missing ssid/pass");
+    } else if (nvs_run(1, j_ssid->valuestring, j_pass->valuestring) != 0) {
+      cmd_send_simple("set_wifi", false, "nvs error");
     } else {
-      strlcpy(s_old_ssid, settings_get_wifi_ssid(), sizeof(s_old_ssid));
-      strlcpy(s_old_pass, settings_get_wifi_pass(), sizeof(s_old_pass));
-      int rc = nvs_run(1, j_ssid->valuestring, j_pass->valuestring);
-      if (rc != 0) {
-        cmd_send_simple("set_wifi", false, "nvs error");
-      } else {
-        s_wifi_pending = true;
-        s_wifi_failures = 0;
-        cmd_send_simple("set_wifi", true, "stored, connecting");
-        /* 1.1.1: push the NEW creds into the driver BEFORE disconnect —
-         * esp_wifi_connect() alone reuses the boot-time config and
-         * "verifies" the old password (measured 2026-10-03). */
-        pipecat_wifi_apply_runtime_config();
-        esp_wifi_disconnect();  /* event handler reconnects with new creds */
-      }
+      cmd_send_simple("set_wifi", true, "stored, rebooting to verify");
+      vTaskDelay(pdMS_TO_TICKS(300));  /* let the ack leave the wire */
+      esp_restart();
     }
   } else {
     ESP_LOGW(TAG, "unknown cmd: %s", cmd);
