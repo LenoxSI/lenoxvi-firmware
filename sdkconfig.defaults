@@ -42,9 +42,23 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 
-# Disable Watchdog
-# CONFIG_ESP_INT_WDT is not set
-# CONFIG_ESP_TASK_WDT_EN is not set
+# Watchdogs ON (M5, 1.2.25 — design note). They were disabled here since the
+# upstream example; a node that hangs a core now reboots instead of sitting
+# dead until someone power-cycles it. Panic = print + reboot (default), and
+# the OTA rollback gate still catches a new image that loops.
+#  - Task WDT: 20 s, watching BOTH cores' idle tasks (anything hogging a
+#    core for 20 s). The longest legit CPU burst at boot is the DTLS RSA-1024
+#    keygen with hardware MPI — well under a second.
+#  - Interrupt WDT: 800 ms (IDF default 300) for hung ISRs/critical sections.
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=20
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
+CONFIG_ESP_INT_WDT=y
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=800
+CONFIG_ESP_INT_WDT_CHECK_CPU1=y
 
 # Enable Compiler Optimization
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
