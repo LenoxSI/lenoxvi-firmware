@@ -675,13 +675,11 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
     /* stereo32@48k NATIVE (master image) -> mono16@16k. Audio in the HIGH 16
      * bits of every frame; linear boxcar decimation over all 6 words per
      * output sample (Kyzcreig's proven decimator — LP before downsample,
-     * formants survive for STT). lo16 kept in diag only to catch a bit-layout
-     * surprise (note-011 trap #8: layout changes with the image — VERIFY with
-     * the raw dumps, don't assume). */
+     * formants survive for STT). Per-second hi16/lo16 peaks feed the dead-bus
+     * self-heal below (a live bus is never all-zero in both halves). */
     static int32_t diag_peak_hi = 0;
     static int32_t diag_peak_lo = 0;
     static uint32_t diag_frames = 0;
-    static uint32_t diag_dumped = 0;
     for (int i = 0; i < PCM_MONO_SAMPLES; i++) {
         const int32_t *f = &mic_stereo48[6 * i];      /* 3 stereo frames */
         int32_t acc = (f[0] >> 16) + (f[1] >> 16) + (f[2] >> 16) +
@@ -692,20 +690,9 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
         int16_t lo = (int16_t)((f[0] | f[1] | f[2]) & 0xFFFF);
         int32_t a = hi < 0 ? -hi : hi; if (a > diag_peak_hi) diag_peak_hi = a;
         int32_t b = lo < 0 ? -lo : lo; if (b > diag_peak_lo) diag_peak_lo = b;
-        /* Dump one 3-frame group every 5 s unconditionally (first 12 dumps),
-         * plus loud ones: settles the real word layout with evidence. */
-        if (i == 20 && ((diag_frames % 250 == 0 && diag_dumped < 12) || (a > 2000 && diag_dumped < 24))) {
-            diag_dumped++;
-            ESP_LOGI(LOG_TAG, "LOUD raw[%lu]: %08x %08x %08x %08x %08x %08x",
-                     (unsigned long)diag_frames,
-                     (unsigned)f[0], (unsigned)f[1], (unsigned)f[2],
-                     (unsigned)f[3], (unsigned)f[4], (unsigned)f[5]);
-        }
         mic_mono16[i] = hi;
     }
     if (++diag_frames % 50 == 0) {  /* once per second at 50 fps */
-        ESP_LOGI(LOG_TAG, "mic diag: hi16_peak=%d lo16_peak=%d frames=%lu muted=%d",
-                 (int)diag_peak_hi, (int)diag_peak_lo, (unsigned long)diag_frames, is_playing ? 1 : 0);
         /* SELF-HEAL (2026-09-16): the XMOS I2S-slave output engages at
          * startup only sometimes (a lock lottery vs. our MCLK/BCLK start;
          * a XIAO-only reset drops MCLK for ~7s and re-rolls it). A live bus
@@ -739,17 +726,5 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
     if (mic_mute.load()) { memset(mic_mono16, 0, PCM_MONO_BYTES); }
     auto n = opus_encode(opus_encoder, (const opus_int16 *)mic_mono16,
                          PCM_MONO_SAMPLES, encoder_output_buffer, OPUS_BUFFER_SIZE);
-    /* Encoder-side diag: what actually leaves the node. If mic peaks are
-     * high but every packet is 7 bytes (DTX/silence), the loss is between
-     * mic_mono16 and the wire — encoder input or encoder state. */
-    static int32_t enc_in_peak = 0; static int enc_max = 0, enc_cnt = 0;
-    for (int i = 0; i < PCM_MONO_SAMPLES; i++) {
-        int32_t v = mic_mono16[i]; if (v < 0) v = -v; if (v > enc_in_peak) enc_in_peak = v;
-    }
-    if (n > enc_max) enc_max = n;
-    if (++enc_cnt % 50 == 0) {
-        ESP_LOGI(LOG_TAG, "enc diag: in_peak=%d max_pkt=%d", (int)enc_in_peak, enc_max);
-        enc_in_peak = 0; enc_max = 0;
-    }
     if (n > 0) peer_connection_send_audio(peer_connection, encoder_output_buffer, n);
 }

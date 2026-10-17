@@ -139,22 +139,6 @@ void pipecat_init_wifi() {
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_start());
 
-  /* Quick scan — shows every visible SSID so we can confirm the radio works */
-  wifi_scan_config_t scan_cfg = {};
-  esp_wifi_scan_start(&scan_cfg, true);   /* blocking */
-  uint16_t ap_count = 0;
-  esp_wifi_scan_get_ap_num(&ap_count);
-  ESP_LOGI(LOG_TAG, "WiFi scan: %d APs found", ap_count);
-  if (ap_count > 0) {
-    wifi_ap_record_t *aps = (wifi_ap_record_t *)malloc(ap_count * sizeof(wifi_ap_record_t));
-    esp_wifi_scan_get_ap_records(&ap_count, aps);
-    for (int i = 0; i < ap_count; i++) {
-      ESP_LOGI(LOG_TAG, "  [%d] SSID: '%.32s'  RSSI: %d  Ch: %d",
-               i, aps[i].ssid, aps[i].rssi, aps[i].primary);
-    }
-    free(aps);
-  }
-
   ESP_LOGI(LOG_TAG, "Connecting to WiFi SSID: %s",
            settings_get_wifi_ssid());
   wifi_config_t wifi_config;

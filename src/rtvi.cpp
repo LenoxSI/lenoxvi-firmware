@@ -88,7 +88,7 @@ static void rtvi_handle_message(const rtvi_msg_t *msg) {
     ESP_LOGE(LOG_TAG, "Unable to find `type` field in RTVI message");
     return;
   }
-  ESP_LOGI(LOG_TAG, "RTVI dispatch: type=%s", j_type->valuestring);
+  ESP_LOGD(LOG_TAG, "RTVI dispatch: type=%s", j_type->valuestring);
 
   switch (hash(j_type->valuestring)) {
     case hash("bot-started-speaking"):
