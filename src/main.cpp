@@ -51,8 +51,14 @@ extern "C" void app_main(void) {
   // CONTIGUOUS internal block and fails with -0x0020 (ALLOC_FAILED) if I2S
   // runs first (measured: largest block 25.6KB with I2S-first vs enough when
   // DTLS allocates first). The audio task starts on CONNECTED anyway.
+  /* M1: start the trial watcher BEFORE Wi-Fi — pipecat_init_wifi() blocks
+   * until it gets an IP, so on a network that doesn't exist (or a wrong
+   * password) a watcher started after it never ran and the node sat
+   * connecting forever (1.2.23, live 2026-10-16 21:39). The watcher needs
+   * only a flag + a timer; it doesn't need Wi-Fi up. No-op unless this
+   * boot is a trial attempt. */
+  pipecat_wifi_trial_start();
   pipecat_init_wifi();
-  pipecat_wifi_trial_start();   /* M1: no-op unless this boot is a trial attempt */
 
   // OTA check now runs from the got-ip event handler (wifi.cpp) — running
   // it here raced the network AND failed TLS allocation before the heap
