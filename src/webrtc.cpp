@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "main.h"
+#include "boot_diag.h"
 #include "rgb.h"
 #include "cmd.h"
 
@@ -101,7 +102,7 @@ static void check_connect_watchdog(void) {
     ESP_LOGE(LOG_TAG, "never reached CONNECTED %d s after the offer (stuck in "
              "NEW/CHECKING) — reboot re-roll", CONNECT_TIMEOUT_MS / 1000);
 #ifndef LINUX_BUILD
-    esp_restart();
+    boot_diag_restart("connect-timeout");
 #endif
   }
 }
@@ -110,7 +111,7 @@ static void check_dc_watchdog(void) {
   if (connected_at == 0 || dc_opened) return;
   if (xTaskGetTickCount() - connected_at > pdMS_TO_TICKS(20000)) {
     ESP_LOGE(LOG_TAG, "DataChannel never opened 20s post-connect — reboot re-roll");
-    esp_restart();
+    boot_diag_restart("dc-never-opened");
   }
 }
 
@@ -139,7 +140,7 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
     }
 #ifndef LINUX_BUILD
     vTaskDelay(pdMS_TO_TICKS(3000));
-    esp_restart();
+    boot_diag_restart("peer-dropped");
 #endif
   } else if (state == PEER_CONNECTION_CONNECTED) {
    rgb_set_state(RGB_STATE_BRIDGE_CONNECTED);
@@ -157,7 +158,7 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
     if (stack_memory == NULL) {
       ESP_LOGE(LOG_TAG, "audio task PSRAM stack alloc failed — rebooting");
       vTaskDelay(pdMS_TO_TICKS(500));
-      esp_restart();
+      boot_diag_restart("audio-stack-oom");
     }
     xTaskCreateStaticPinnedToCore(pipecat_send_audio_task, "audio_publisher",
                                   30000, NULL, 7, stack_memory, &task_buffer,
@@ -229,7 +230,7 @@ void pipecat_init_webrtc() {
   if (peer_connection == NULL) {
     ESP_LOGE(LOG_TAG, "Failed to create peer connection");
 #ifndef LINUX_BUILD
-    esp_restart();
+    boot_diag_restart("peer-create-failed");
 #endif
   }
   ESP_LOGI(LOG_TAG, "heap at webrtc init: free=%u largest=%u",

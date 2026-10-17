@@ -1,4 +1,5 @@
 #include "main.h"
+#include "boot_diag.h"
 
 #ifndef LINUX_BUILD
 
@@ -183,7 +184,7 @@ static esp_err_t download_and_flash_ota(const char *firmware_url) {
             ESP_LOGE(OTA_TAG, "the session dropped during the OTA and its reboot "
                      "was deferred — rebooting now to reconnect");
             vTaskDelay(pdMS_TO_TICKS(500));  /* let the log line leave */
-            esp_restart();
+            boot_diag_restart("ota-failed-deferred");
         }
     }
     return rc;
@@ -461,7 +462,7 @@ void pipecat_check_ota_update(void) {
 
     ESP_LOGI(OTA_TAG, "OTA update successful, rebooting in 2 seconds...");
     vTaskDelay(pdMS_TO_TICKS(2000));
-    esp_restart();
+    boot_diag_restart("ota-success");
 }
 
 /* ── OTA health gate + rollback (design note H1, 2026-10-13) ────────
@@ -522,6 +523,7 @@ static void ota_health_task(void *arg) {
         ESP_LOGE(OTA_TAG, "health gate TIMED OUT (%d s, no bot round-trip) — "
                  "rolling back to the previous image", OTA_HEALTH_TIMEOUT_MS / 1000);
         vTaskDelay(pdMS_TO_TICKS(200));  /* let the log line leave */
+        boot_diag_mark("ota-health-timeout");
         esp_ota_mark_app_invalid_rollback_and_reboot();
         esp_restart();  /* not reached on success; a plain reboot also rolls back */
     }

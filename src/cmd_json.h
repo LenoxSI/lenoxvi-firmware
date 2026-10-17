@@ -39,13 +39,25 @@ typedef struct cmd_audio_stats_t {
   uint32_t max_gap_us;   /* worst gap between frame reads, since last read */
 } cmd_audio_stats_t;
 
+/* Reboot black box (1.2.29): why the previous boot ended, plus link
+ * quality — see boot_diag.h for the meaning of each field. */
+typedef struct cmd_boot_info_t {
+  const char *reason;   /* chip reset reason name ("sw", "panic", ...) */
+  const char *why;      /* our own reboot path, "" when none */
+  uint32_t prev_up_s;   /* uptime of the previous boot, seconds */
+  uint32_t up_s;        /* uptime of this boot, seconds */
+  int rssi;             /* Wi-Fi signal, dBm; 0 = not associated (-> null) */
+} cmd_boot_info_t;
+
 /* {...,"cmd":"get_info","ok":true,"data":{"name","mac","fw","line","muted",
  *  "mute_hw":{"btn"},"audio":{"core","frames","ovf","max_work_ms",
- *  "max_gap_ms"}}} — mac is the 6 raw bytes, printed as 12 hex chars;
- *  "audio" is omitted when audio is NULL. */
+ *  "max_gap_ms"},"boot":{"reason","why","prev_up_s","up_s"},
+ *  "wifi":{"rssi"}}} — mac is the 6 raw bytes, printed as 12 hex chars;
+ *  "audio" is omitted when audio is NULL, "boot" + "wifi" when boot is. */
 char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
                     const char *line, bool muted, int btn,
-                    const cmd_audio_stats_t *audio);
+                    const cmd_audio_stats_t *audio,
+                    const cmd_boot_info_t *boot);
 
 /* {...,"cmd":"scan","ok":true,"data":{<ssid>:<rssi>,...}} — ssids is n
  * entries of 33 bytes (NUL-terminated, like wifi_ap_record_t.ssid). Callers

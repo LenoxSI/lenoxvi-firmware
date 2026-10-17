@@ -86,7 +86,8 @@ char *cmd_json_name(const char *name) {
 
 char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
                     const char *line, bool muted, int btn,
-                    const cmd_audio_stats_t *audio) {
+                    const cmd_audio_stats_t *audio,
+                    const cmd_boot_info_t *boot) {
   cJSON *root = envelope("get_info", true);
   cJSON *data = root ? cJSON_AddObjectToObject(root, "data") : NULL;
   if (!data) { cJSON_Delete(root); return NULL; }
@@ -116,6 +117,23 @@ char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
         || !cJSON_AddNumberToObject(au, "ovf", (double)audio->ovf)
         || !cJSON_AddNumberToObject(au, "max_work_ms", (double)(audio->max_work_us / 100) / 10.0)
         || !cJSON_AddNumberToObject(au, "max_gap_ms", (double)(audio->max_gap_us / 100) / 10.0)) {
+      cJSON_Delete(root);
+      return NULL;
+    }
+  }
+  if (boot) {
+    char safe_reason[16], safe_why[24];
+    cmd_json_utf8_sanitize(boot->reason ? boot->reason : "", safe_reason, sizeof(safe_reason));
+    cmd_json_utf8_sanitize(boot->why ? boot->why : "", safe_why, sizeof(safe_why));
+    cJSON *bo = cJSON_AddObjectToObject(data, "boot");
+    cJSON *wf = bo ? cJSON_AddObjectToObject(data, "wifi") : NULL;
+    if (!wf
+        || !cJSON_AddStringToObject(bo, "reason", safe_reason)
+        || !cJSON_AddStringToObject(bo, "why", safe_why)
+        || !cJSON_AddNumberToObject(bo, "prev_up_s", (double)boot->prev_up_s)
+        || !cJSON_AddNumberToObject(bo, "up_s", (double)boot->up_s)
+        || !(boot->rssi ? cJSON_AddNumberToObject(wf, "rssi", boot->rssi)
+                        : cJSON_AddNullToObject(wf, "rssi"))) {
       cJSON_Delete(root);
       return NULL;
     }

@@ -11,6 +11,7 @@
  */
 
 #include "cmd.h"
+#include "boot_diag.h"
 
 #include <esp_log.h>
 #include <esp_system.h>
@@ -202,7 +203,7 @@ bool pipecat_cmd_handle(const cJSON *msg) {
   } else if (strcmp(cmd, "restart") == 0) {
     cmd_send_simple("restart", true, "rebooting");
     vTaskDelay(pdMS_TO_TICKS(300));  /* let the ack leave the wire */
-    esp_restart();
+    boot_diag_restart("cmd-restart");
   } else if (strcmp(cmd, "get_info") == 0) {
     int dbg_btn;
     pipecat_mute_hw_diag(&dbg_btn);   /* array: raw mute-button bit (support/diagnostics) */
@@ -210,9 +211,13 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     cmd_audio_stats_t au;
     pipecat_audio_stats(&au);         /* audio-loop health (1.2.27) */
+    wifi_ap_record_t ap;              /* reboot black box + link (1.2.29) */
+    cmd_boot_info_t bi = {boot_diag_reason(), boot_diag_prev_why(),
+                          boot_diag_prev_up_s(), boot_diag_up_s(),
+                          esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0};
     char *reply = cmd_json_info(settings_get_node_name(), mac,
                                 esp_app_get_description()->version, XVF_OTA_TRACK,
-                                pipecat_mic_muted(), dbg_btn, &au);
+                                pipecat_mic_muted(), dbg_btn, &au, &bi);
     if (reply) {
       pipecat_rtvi_send_raw(reply);
       cmd_json_free(reply);
@@ -286,7 +291,7 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     } else {
       cmd_send_simple("set_wifi", true, "stored, rebooting to verify");
       vTaskDelay(pdMS_TO_TICKS(300));  /* let the ack leave the wire */
-      esp_restart();
+      boot_diag_restart("set-wifi");
     }
   } else {
     ESP_LOGW(TAG, "unknown cmd: %s", cmd);
@@ -313,7 +318,7 @@ static void liveness_task(void *arg) {
     vTaskDelay(pdMS_TO_TICKS(300000));
     if (!s_pong_received) {
       ESP_LOGE(TAG, "no pong for 90s — session zombie, reboot re-roll");
-      esp_restart();
+      boot_diag_restart("liveness-no-pong");
     }
     s_pong_received = false;
     /* Probe is cmd "probe" — NOT "ping": the bot answers with

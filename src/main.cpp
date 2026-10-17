@@ -1,4 +1,5 @@
 #include "main.h"
+#include "boot_diag.h"
 
 #include <esp_event.h>
 #include <esp_log.h>
@@ -11,6 +12,7 @@
 #include "rgb.h"
 
 extern "C" void app_main(void) {
+  boot_diag_init();  /* 1.2.29: capture why the previous boot ended */
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
       ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

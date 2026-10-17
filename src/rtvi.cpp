@@ -1,4 +1,5 @@
 #include "freertos/FreeRTOS.h"
+#include "boot_diag.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include <cJSON.h>
@@ -117,7 +118,7 @@ static void rtvi_handle_message(const rtvi_msg_t *msg) {
        * WebRTC/audio exist. Update latency = one reboot (~15s), which the
        * node does anyway on disconnects. */
       ESP_LOGI(LOG_TAG, "check-ota received — rebooting into boot-time check");
-      esp_restart();
+      boot_diag_restart("check-ota");
       break;
     }
     default:

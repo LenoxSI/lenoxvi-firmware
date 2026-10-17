@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "main.h"
+#include "boot_diag.h"
 #include "settings.h"
 
 #ifndef MIN
@@ -37,7 +38,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
       if (esp_http_client_is_chunked_response(evt->client)) {
         ESP_LOGE(LOG_TAG, "Chunked HTTP response not supported");
 #ifndef LINUX_BUILD
-        esp_restart();
+        boot_diag_restart("offer-chunked");
 #endif
       }
 
@@ -123,7 +124,7 @@ void pipecat_http_request(char *offer, char *answer) {
     ESP_LOGE(LOG_TAG, "Error perform http request %s (status %d)",
              esp_err_to_name(err), status_code);
 #ifndef LINUX_BUILD
-    esp_restart();
+    boot_diag_restart("offer-http-error");
 #endif
   }
 
@@ -135,7 +136,7 @@ void pipecat_http_request(char *offer, char *answer) {
   if (j_response == NULL) {
     ESP_LOGE(LOG_TAG, "Error parsing HTTP response");
 #ifndef LINUX_BUILD
-    esp_restart();
+    boot_diag_restart("offer-bad-json");
 #endif
   }
 
@@ -143,7 +144,7 @@ void pipecat_http_request(char *offer, char *answer) {
   if (j_answer == NULL) {
     ESP_LOGE(LOG_TAG, "Unable to find `sdp` field in response");
 #ifndef LINUX_BUILD
-    esp_restart();
+    boot_diag_restart("offer-no-sdp");
 #endif
   }
 

@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "main.h"
+#include "boot_diag.h"
 #include "rgb.h"
 #include "settings.h"
 #include "cmd.h"
@@ -63,7 +64,7 @@ static void wifi_trial_task(void *arg) {
       ESP_LOGE(LOG_TAG, "wifi trial: bot not reached within %d s — rebooting (next attempt)",
                WIFI_TRIAL_TIMEOUT_MS / 1000);
       vTaskDelay(pdMS_TO_TICKS(200));
-      esp_restart();
+      boot_diag_restart("wifi-trial-timeout");
     }
     vTaskDelay(pdMS_TO_TICKS(250));
   }
@@ -80,7 +81,7 @@ void pipecat_wifi_trial_start(void) {
   if (xTaskCreate(wifi_trial_task, "wifi_trial", 4096, NULL, 4, NULL) != pdPASS) {
     ESP_LOGE(LOG_TAG, "wifi trial: task spawn failed — rebooting to retry");
     vTaskDelay(pdMS_TO_TICKS(500));
-    esp_restart();
+    boot_diag_restart("wifi-trial-spawn");
   }
   ESP_LOGW(LOG_TAG, "wifi trial: waiting up to %d s for the bot", WIFI_TRIAL_TIMEOUT_MS / 1000);
 }

@@ -25,14 +25,14 @@ int main(void) {
   emit("name_plain", cmd_json_name("room-b"));
   emit("name_quote", cmd_json_name("a\"b"));
   const uint8_t mac[6] = {0x02, 0x00, 0x00, 0xaa, 0xbb, 0x01};
-  emit("info_plain", cmd_json_info("room-b", mac, "1.2.20", "array", true, 1, NULL));
-  emit("info_hostile", cmd_json_info("x\",\"muted\":false,\"y\":\"", mac, "1.2.20", "flex", false, -2, NULL));
+  emit("info_plain", cmd_json_info("room-b", mac, "1.2.20", "array", true, 1, NULL, NULL));
+  emit("info_hostile", cmd_json_info("x\",\"muted\":false,\"y\":\"", mac, "1.2.20", "flex", false, -2, NULL, NULL));
   /* audio-loop health (1.2.27): lifetime counters near uint32 max must
    * stay exact (a double holds 2^53), ms rounds DOWN to 0.1 */
   const cmd_audio_stats_t au = {1, 4294967295u, 3, 12345, 40999};
-  emit("info_audio", cmd_json_info("a", mac, "1.2.27", "array", false, 1, &au));
+  emit("info_audio", cmd_json_info("a", mac, "1.2.27", "array", false, 1, &au, NULL));
   const cmd_audio_stats_t au0 = {-1, 0, 0, 0, 0};
-  emit("info_audio_idle", cmd_json_info("a", mac, "1.2.27", "flex", false, -1, &au0));
+  emit("info_audio_idle", cmd_json_info("a", mac, "1.2.27", "flex", false, -1, &au0, NULL));
 
   /* 3. scan: SSIDs straight off the air */
   static uint8_t ssids[8][33];

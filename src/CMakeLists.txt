@@ -6,7 +6,7 @@ if(IDF_TARGET STREQUAL linux)
 		REQUIRES peer esp-libopus esp_http_client json)
 else()
 	idf_component_register(
-		SRCS ${COMMON_SRC} "wifi.cpp" "media.cpp" "rtvi.cpp" "rtvi_callbacks.cpp" "rgb.c" "ota.cpp" "settings.cpp" "cmd.cpp" "cmd_json.c" "wifi_trial.c"
+		SRCS ${COMMON_SRC} "wifi.cpp" "media.cpp" "rtvi.cpp" "rtvi_callbacks.cpp" "rgb.c" "ota.cpp" "settings.cpp" "cmd.cpp" "cmd_json.c" "wifi_trial.c" "boot_diag.c"
 		REQUIRES driver esp_wifi nvs_flash peer esp_psram esp-libopus esp_http_client json app_update esp_timer)
 endif()
 
