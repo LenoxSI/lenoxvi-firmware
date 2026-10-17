@@ -34,6 +34,21 @@ int main(void) {
   const cmd_audio_stats_t au0 = {-1, 0, 0, 0, 0};
   emit("info_audio_idle", cmd_json_info("a", mac, "1.2.27", "flex", false, -1, &au0, NULL));
 
+  /* reboot black box (1.2.29): a crash (no tag), a tagged deliberate
+   * reboot with link quality, not associated (rssi 0 -> null), and a
+   * tag that is overlong + carries JSON-breaking bytes (must be escaped
+   * and cut, never structure) */
+  const cmd_boot_info_t b_panic = {"panic", "", 139, 42, -61};
+  emit("info_boot_panic", cmd_json_info("a", mac, "1.2.29", "array", true, 1, &au, &b_panic));
+  const cmd_boot_info_t b_sw = {"sw", "peer-dropped", 4294967295u, 7, -88};
+  emit("info_boot_sw", cmd_json_info("a", mac, "1.2.29", "array", true, 1, NULL, &b_sw));
+  const cmd_boot_info_t b_cold = {"power_on", "", 0, 3, 0};
+  emit("info_boot_cold", cmd_json_info("a", mac, "1.2.29", "flex", false, -1, NULL, &b_cold));
+  const cmd_boot_info_t b_evil = {"sw\",\"x\":1", "a\"}\\b\x01" "cdefghijklmnopqrstuvwxyz0123", 1, 1, -50};
+  emit("info_boot_hostile", cmd_json_info("a", mac, "1.2.29", "array", false, 1, NULL, &b_evil));
+  const cmd_boot_info_t b_null = {NULL, NULL, 0, 0, 0};
+  emit("info_boot_nullstr", cmd_json_info("a", mac, "1.2.29", "array", false, 1, NULL, &b_null));
+
   /* 3. scan: SSIDs straight off the air */
   static uint8_t ssids[8][33];
   int8_t rssi[8] = {-40, -55, -61, -70, -72, -80, -85, -90};

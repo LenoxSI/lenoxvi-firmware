@@ -63,6 +63,29 @@ check("info audio: existing fields untouched", d["fw"] == "1.2.27" and d["mute_h
 d = J("info_audio_idle")["data"]
 check("info audio: not-started loop reports core -1 and zeros",
       d.get("audio") == {"core": -1, "frames": 0, "ovf": 0, "max_work_ms": 0, "max_gap_ms": 0}, d.get("audio"))
+d = J("info_plain")["data"]
+check("info boot: block absent when no boot info (older callers)", "boot" not in d and "wifi" not in d, d)
+d = J("info_boot_panic")["data"]
+check("info boot: crash reports reason, empty why, both uptimes",
+      d.get("boot") == {"reason": "panic", "why": "", "prev_up_s": 139, "up_s": 42}, d.get("boot"))
+check("info boot: rssi in its own wifi block", d.get("wifi") == {"rssi": -61}, d.get("wifi"))
+check("info boot: audio + existing fields untouched beside it",
+      d.get("audio", {}).get("frames") == 4294967295 and d["muted"] is True and d["fw"] == "1.2.29", d)
+d = J("info_boot_sw")["data"]
+check("info boot: deliberate reboot names its path; uint32 uptime exact",
+      d.get("boot") == {"reason": "sw", "why": "peer-dropped", "prev_up_s": 4294967295, "up_s": 7}
+      and d.get("wifi") == {"rssi": -88} and "audio" not in d, d)
+d = J("info_boot_cold")["data"]
+check("info boot: not associated -> rssi null (not 0 dBm)", d.get("wifi") == {"rssi": None}, d.get("wifi"))
+check("info boot: cold power-on has no previous record", d["boot"]["reason"] == "power_on" and d["boot"]["prev_up_s"] == 0, d)
+d = J("info_boot_hostile")["data"]
+check("info boot: hostile reason/why are DATA (no injected keys), cut to buffer",
+      set(d["boot"]) == {"reason", "why", "prev_up_s", "up_s"} and "x" not in d
+      and d["boot"]["reason"] == 'sw","x":1' and d["boot"]["why"].startswith('a"}\\b\x01')
+      and len(d["boot"]["why"]) == 23, d.get("boot"))
+d = J("info_boot_nullstr")["data"]
+check("info boot: NULL strings become empty, never a crash",
+      d["boot"]["reason"] == "" and d["boot"]["why"] == "", d.get("boot"))
 d = J("scan_mixed")["data"]
 check("scan: forging SSID is one key, no injected key",
       'a","injected":1,"b' in d and "injected" not in d and d['a","injected":1,"b'] == -55, d)
