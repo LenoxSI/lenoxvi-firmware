@@ -282,9 +282,16 @@ static bool xvf_mute_pin_write_once(bool on) {
     return i2c_master_transmit(xvf3800, p, sizeof(p), pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS)) == ESP_OK;
 }
 
+#define MUTE_SETTLE_MS        1500   /* let the XMOS settle before the first ask */
 static void mute_task(void *arg) {
-    int stable = 1;               /* debounced button: 1 released, 0 pressed */
+    /* Debounced button: 1 released, 0 pressed, -1 UNKNOWN (1.2.21). The
+     * task used to assume "released" at start, so a bogus 0 on the first
+     * read after boot counted as a press and un-muted a muted node (20:05:27
+     * on 1.2.20, live). Now nothing counts until the button has been SEEN
+     * released: a 0 while unknown just means "not armed yet". */
+    int stable = -1;
     int pending = -1;             /* release candidate awaiting a second good read */
+    vTaskDelay(pdMS_TO_TICKS(MUTE_SETTLE_MS));
     TickType_t last_assert = xTaskGetTickCount();
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(MUTE_POLL_MS));
@@ -293,7 +300,7 @@ static void mute_task(void *arg) {
          * press we missed, the LED snaps back to the node's (= dashboard's)
          * state within a second instead of lying until the next action. */
         TickType_t now = xTaskGetTickCount();
-        bool reassert = stable == 1 && pending == -1
+        bool reassert = stable != 0 && pending == -1
                         && (now - last_assert) >= pdMS_TO_TICKS(MUTE_REASSERT_MS);
         if (mute_hw_dirty.load() || reassert) {
             /* One-shot write (no retry sleeps — a slow failing write would
@@ -312,6 +319,16 @@ static void mute_task(void *arg) {
         int level = xvf_button_read_once();
         s_dbg_btn = level;
         if (level < 0) continue;  /* unknown: neither edge, pending kept */
+        if (stable == -1) {       /* not armed: wait for a confirmed release */
+            if (level == 1 && pending == 1) {
+                stable = 1;
+                pending = -1;
+                ESP_LOGI(LOG_TAG, "mute: button armed (seen released)");
+            } else {
+                pending = level == 1 ? 1 : -1;
+            }
+            continue;
+        }
         if (level == stable) { pending = -1; continue; }
         /* Press: ONE good read (a quick tap may give only one; good reads
          * never showed a false press in ~1,000 live samples). Release: two
