@@ -18,6 +18,7 @@
 #include <ctype.h>
 #include <esp_memory_utils.h>
 #include "wifi_trial.h"
+#include "nvs_str.h"
 
 static const char *TAG = "settings";
 
@@ -56,15 +57,14 @@ static bool stack_in_psram(const char *what) {
 }
 
 /* Copy a value from NVS if the key exists and fits; leave dst
- * untouched otherwise. */
+ * untouched otherwise. len from nvs_get_str includes the NUL — see
+ * nvs_str.h (values that exactly filled their buffer used to be dropped). */
 static void nvs_read_str(nvs_handle_t h, const char *key, char *dst,
                          size_t dst_size) {
   char tmp[WIFI_PASS_MAX > NODE_NAME_MAX ? WIFI_PASS_MAX : NODE_NAME_MAX];
   size_t len = sizeof(tmp);
-  if (nvs_get_str(h, key, tmp, &len) == ESP_OK && len > 0 &&
-      len < dst_size) {
-    memcpy(dst, tmp, len);
-    dst[len] = '\0';
+  if (nvs_get_str(h, key, tmp, &len) == ESP_OK) {
+    nvs_str_copy(dst, dst_size, tmp, len);
   }
 }
 
