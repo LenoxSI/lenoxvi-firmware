@@ -54,6 +54,15 @@ d = J("info_hostile")
 check("info: hostile name can't override muted", d["data"]["muted"] is False
       and d["data"]["name"] == 'x","muted":false,"y":"' and "y" not in d["data"]
       and d["data"]["mute_hw"] == {"btn": -2} and d["data"]["line"] == "flex", d)
+check("info: no audio stats -> no audio key", "audio" not in J("info_plain")["data"], J("info_plain"))
+d = J("info_audio")["data"]
+check("info audio: all fields, counters exact, ms floored to 0.1",
+      d.get("audio") == {"core": 1, "frames": 4294967295, "ovf": 3,
+                         "max_work_ms": 12.3, "max_gap_ms": 40.9}, d.get("audio"))
+check("info audio: existing fields untouched", d["fw"] == "1.2.27" and d["mute_hw"] == {"btn": 1}, d)
+d = J("info_audio_idle")["data"]
+check("info audio: not-started loop reports core -1 and zeros",
+      d.get("audio") == {"core": -1, "frames": 0, "ovf": 0, "max_work_ms": 0, "max_gap_ms": 0}, d.get("audio"))
 d = J("scan_mixed")["data"]
 check("scan: forging SSID is one key, no injected key",
       'a","injected":1,"b' in d and "injected" not in d and d['a","injected":1,"b'] == -55, d)
