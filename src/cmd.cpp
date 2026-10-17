@@ -26,22 +26,21 @@
 
 #include "main.h"
 #include "settings.h"
+#include "cmd_json.h"
 
 static const char *TAG = "cmd";
 
 /* Reply helper shared by every handler: wraps ok + note in the
  * cmd_result envelope. (Declared in cmd.h; defined before use.) */
 void cmd_send_simple(const char *cmd, bool ok, const char *note) {
-  char reply[256];
-  /* "type":"cmd_result" is REQUIRED: pipecat's datachannel parser
-   * does json["type"] on every inbound message and drops the message
-   * on KeyError — measured live 2026-09-29 18:04 ("Error parsing JSON
-   * message …, 'type'"). The LED path uses the same trick. */
-  snprintf(reply, sizeof(reply),
-           "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"%s\","
-           "\"ok\":%s,\"data\":\"%s\"}",
-           cmd, ok ? "true" : "false", note);
+  /* M7 (1.2.20): built with cJSON (cmd_json.c) — `cmd` can be an echo of
+   * whatever the bot sent (the unknown-cmd reply), so it's escaped, never
+   * pasted. "type":"cmd_result" is still REQUIRED (pipecat drops messages
+   * without it, measured 2026-09-29) — the builder always sets it. */
+  char *reply = cmd_json_simple(cmd, ok, note);
+  if (!reply) { ESP_LOGE(TAG, "reply: oom (%s)", cmd ? cmd : "?"); return; }
   pipecat_rtvi_send_raw(reply);
+  cmd_json_free(reply);
 }
 
 /* ── NVS writes must run on an internal-RAM stack ──────────────────
@@ -127,17 +126,20 @@ static void do_scan(void) {
   uint16_t n = 0;
   esp_wifi_scan_get_ap_num(&n);
   if (n > 24) n = 24;  /* cap the reply size */
+  /* +1: malloc(0) may return NULL — an empty scan is an empty list, not
+   * "oom" (the pre-1.2.20 code reported oom with no networks in range). */
   wifi_ap_record_t *aps =
-      (wifi_ap_record_t *)malloc(n * sizeof(wifi_ap_record_t));
-  char *out = (char *)malloc(1536);
-  if (!aps || !out) {
+      (wifi_ap_record_t *)malloc((n + 1) * sizeof(wifi_ap_record_t));
+  uint8_t (*names)[33] = (uint8_t (*)[33])malloc((n + 1) * 33);
+  int8_t *rssi = (int8_t *)malloc(n + 1);
+  if (!aps || !names || !rssi) {
     cmd_send_simple("scan", false, "oom");
-    free(aps); free(out);
+    free(aps); free(names); free(rssi);
     return;
   }
   uint16_t got = n;
   esp_wifi_scan_get_ap_records(&got, aps);
-  int off = 0;
+  int kept = 0;
   for (int i = 0; i < got; i++) {
     /* dedupe: driver returns one entry per channel per SSID */
     bool dup = false;
@@ -147,19 +149,25 @@ static void do_scan(void) {
       }
     }
     if (dup) continue;
-    off += snprintf(out + off, 1536 - off, "%s\"%.32s\":%d",
-                    off > 1 ? "," : "", aps[i].ssid, aps[i].rssi);
-    if (off > 1400) break;
+    memcpy(names[kept], aps[i].ssid, 33);
+    names[kept][32] = 0;
+    rssi[kept] = aps[i].rssi;
+    kept++;
   }
-  char reply[1600];
-  snprintf(reply, sizeof(reply),
-           "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"scan\","
-           "\"ok\":true,\"data\":{%s}}",
-           out);
-  pipecat_rtvi_send_raw(reply);
-  ESP_LOGI(TAG, "scan: replied %d SSIDs", got);
+  /* M7 (1.2.20): network names come off the AIR — any neighbour can name a
+   * network `a","x":1`. cJSON escapes them and invalid UTF-8 becomes '?'
+   * (cmd_json.c); output capped like the old 1400 B buffer. */
+  char *reply = cmd_json_scan((const uint8_t (*)[33])names, rssi, kept, 1500);
+  if (reply) {
+    pipecat_rtvi_send_raw(reply);
+    cmd_json_free(reply);
+  } else {
+    cmd_send_simple("scan", false, "oom");
+  }
+  ESP_LOGI(TAG, "scan: replied %d SSIDs", kept);
   free(aps);
-  free(out);
+  free(names);
+  free(rssi);
 }
 
 /* ── connect-push: firmware version → bot, once per data-channel open.
@@ -230,15 +238,15 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     pipecat_mute_hw_diag(&dbg_btn);   /* array: raw mute-button bit (support/diagnostics) */
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    char reply[512];
-    snprintf(reply, sizeof(reply),
-             "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"get_info\","
-             "\"ok\":true,\"data\":{\"name\":\"%s\",\"mac\":\"%02x%02x%02x%02x%02x%02x\","
-             "\"fw\":\"%s\",\"line\":\"%s\",\"muted\":%s,\"mute_hw\":{\"btn\":%d}}}",
-             settings_get_node_name(), mac[0], mac[1], mac[2], mac[3],
-             mac[4], mac[5], esp_app_get_description()->version, XVF_OTA_TRACK,
-             pipecat_mic_muted() ? "true" : "false", dbg_btn);
-    pipecat_rtvi_send_raw(reply);
+    char *reply = cmd_json_info(settings_get_node_name(), mac,
+                                esp_app_get_description()->version, XVF_OTA_TRACK,
+                                pipecat_mic_muted(), dbg_btn);
+    if (reply) {
+      pipecat_rtvi_send_raw(reply);
+      cmd_json_free(reply);
+    } else {
+      cmd_send_simple("get_info", false, "oom");
+    }
   } else if (strcmp(cmd, "set_mute") == 0) {
     /* Mic mute (flex 1.1.0; both boards since 1.2.11, H4): "mute":
      * true|false, or omit for toggle. Persisted; on array it drives the
@@ -277,13 +285,13 @@ bool pipecat_cmd_handle(const cJSON *msg) {
          * from THIS ack (immediately, no reboot needed). Plain "ok"
          * left the dashboard showing the old label until re-offer
          * (measured 2026-09-29 19:38). */
-        char reply[160];
-        snprintf(reply, sizeof(reply),
-                 "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\","
-                 "\"cmd\":\"set_name\",\"ok\":true,"
-                 "\"data\":{\"name\":\"%s\"}}",
-                 settings_get_node_name());
-        pipecat_rtvi_send_raw(reply);
+        char *reply = cmd_json_name(settings_get_node_name());
+        if (reply) {
+          pipecat_rtvi_send_raw(reply);
+          cmd_json_free(reply);
+        } else {
+          cmd_send_simple("set_name", false, "oom");
+        }
       } else {
         cmd_send_simple("set_name", false, "nvs error");
       }
