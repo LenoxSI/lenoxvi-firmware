@@ -85,7 +85,8 @@ char *cmd_json_name(const char *name) {
 }
 
 char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
-                    const char *line, bool muted, int btn) {
+                    const char *line, bool muted, int btn,
+                    const cmd_audio_stats_t *audio) {
   cJSON *root = envelope("get_info", true);
   cJSON *data = root ? cJSON_AddObjectToObject(root, "data") : NULL;
   if (!data) { cJSON_Delete(root); return NULL; }
@@ -105,6 +106,19 @@ char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
       || !cJSON_AddNumberToObject(hw, "btn", btn)) {
     cJSON_Delete(root);
     return NULL;
+  }
+  if (audio) {
+    /* ms with 0.1 resolution: frames are 20 ms, so sub-ms detail is noise */
+    cJSON *au = cJSON_AddObjectToObject(data, "audio");
+    if (!au
+        || !cJSON_AddNumberToObject(au, "core", audio->core)
+        || !cJSON_AddNumberToObject(au, "frames", (double)audio->frames)
+        || !cJSON_AddNumberToObject(au, "ovf", (double)audio->ovf)
+        || !cJSON_AddNumberToObject(au, "max_work_ms", (double)(audio->max_work_us / 100) / 10.0)
+        || !cJSON_AddNumberToObject(au, "max_gap_ms", (double)(audio->max_gap_us / 100) / 10.0)) {
+      cJSON_Delete(root);
+      return NULL;
+    }
   }
   return finish(root);
 }

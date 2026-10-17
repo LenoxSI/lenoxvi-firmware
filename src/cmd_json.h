@@ -28,10 +28,24 @@ char *cmd_json_simple(const char *cmd, bool ok, const char *note);
 /* {...,"cmd":"set_name","ok":true,"data":{"name":<name>}} */
 char *cmd_json_name(const char *name);
 
+/* Audio-loop health (1.2.27): lifetime counters + worst cases since the
+ * previous get_info. ovf is the ground truth — each count is an I2S DMA
+ * buffer the mic produced and the loop never read (audio LOST). */
+typedef struct cmd_audio_stats_t {
+  int core;              /* core the audio loop last ran on (-1 = not started) */
+  uint32_t frames;       /* 20 ms frames encoded + handed to the RTP sender */
+  uint32_t ovf;          /* I2S RX DMA queue overflows since boot */
+  uint32_t max_work_us;  /* worst decimate + encode + send, since last read */
+  uint32_t max_gap_us;   /* worst gap between frame reads, since last read */
+} cmd_audio_stats_t;
+
 /* {...,"cmd":"get_info","ok":true,"data":{"name","mac","fw","line","muted",
- *  "mute_hw":{"btn"}}} — mac is the 6 raw bytes, printed as 12 hex chars. */
+ *  "mute_hw":{"btn"},"audio":{"core","frames","ovf","max_work_ms",
+ *  "max_gap_ms"}}} — mac is the 6 raw bytes, printed as 12 hex chars;
+ *  "audio" is omitted when audio is NULL. */
 char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
-                    const char *line, bool muted, int btn);
+                    const char *line, bool muted, int btn,
+                    const cmd_audio_stats_t *audio);
 
 /* {...,"cmd":"scan","ok":true,"data":{<ssid>:<rssi>,...}} — ssids is n
  * entries of 33 bytes (NUL-terminated, like wifi_ap_record_t.ssid). Callers

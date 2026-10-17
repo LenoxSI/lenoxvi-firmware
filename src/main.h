@@ -25,6 +25,10 @@ extern bool pipecat_mic_mute_toggle(void);
 extern bool pipecat_mic_mute_set(bool muted);
 extern bool pipecat_mute_push_take(void);    // true once per button change
 extern "C" void pipecat_mute_hw_diag(int *btn);  // array: raw mute button bit (1 up, 0 down, -1 n/a)
+// Audio-loop health (1.2.27, media.cpp): core, frames, mic overflows, worst
+// work/gap since the previous call (resets the worst cases).
+struct cmd_audio_stats_t;
+extern "C" void pipecat_audio_stats(struct cmd_audio_stats_t *out);
 
 // WebRTC / Signalling
 extern void pipecat_init_webrtc();

@@ -208,9 +208,11 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     pipecat_mute_hw_diag(&dbg_btn);   /* array: raw mute-button bit (support/diagnostics) */
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    cmd_audio_stats_t au;
+    pipecat_audio_stats(&au);         /* audio-loop health (1.2.27) */
     char *reply = cmd_json_info(settings_get_node_name(), mac,
                                 esp_app_get_description()->version, XVF_OTA_TRACK,
-                                pipecat_mic_muted(), dbg_btn);
+                                pipecat_mic_muted(), dbg_btn, &au);
     if (reply) {
       pipecat_rtvi_send_raw(reply);
       cmd_json_free(reply);
