@@ -10,23 +10,37 @@ Each supported board is its own **line**, with one name used everywhere. All
 lines build from the `main` branch; the line is chosen per build with
 `-DBOARD`:
 
-| line  | board                                    | build flag     | image             | tags           |
-|-------|------------------------------------------|----------------|-------------------|----------------|
-| array | reSpeaker XVF3800 mic array + ESP32-S3   | `-DBOARD=array` | `array_esp32.bin` | `array-vX.Y.Z` |
-| flex  | reSpeaker Flex (XVF3800) + XIAO ESP32-S3 | `-DBOARD=flex`  | `flex_esp32.bin`  | `flex-vX.Y.Z`  |
+| line      | board                                    | build flag          | image                 | tags               |
+|-----------|------------------------------------------|---------------------|-----------------------|--------------------|
+| array     | reSpeaker XVF3800 mic array + ESP32-S3   | `-DBOARD=array`     | `array_esp32.bin`     | `array-vX.Y.Z`     |
+| flex      | reSpeaker Flex (XVF3800) + XIAO ESP32-S3 | `-DBOARD=flex`      | `flex_esp32.bin`      | `flex-vX.Y.Z`      |
+| waveshare | Waveshare ESP32-S3-AUDIO                 | `-DBOARD=waveshare` | `waveshare_esp32.bin` | `waveshare-vX.Y.Z` |
 
-Never put one line's image on the other line's board. Since 1.2.9 a node
+Never put one line's image on another line's board. Since 1.2.9 a node
 refuses an over-the-air image whose project name isn't its own, and the bot
 refuses uploads whose image doesn't match the chosen line.
 
-Other branches: `waveshare-v1` (frozen archive of the Waveshare board port),
-`feature/nvs-config` (parked work).
+Board notes:
+
+- **array / flex** — the XVF3800 does the audio processing (beamforming,
+  AGC, echo cancellation) and drives the array's 12-LED ring and mute button.
+  Flex has no LED ring or button.
+- **waveshare** (since 1.2.30) — mic only: the ES7210 ADC delivers raw,
+  unprocessed audio (no AGC), so it runs quieter than the XVF lines. Its 7
+  WS2812 LEDs (RGB order) show the same states as the array's ring; while
+  muted, one pixel is red (the array's separate mute LED). The on-board
+  speaker (ES8311) is not used yet; the amplifier is held off. This line's
+  board code lives in `components/board_waveshare/` and is only built for
+  `-DBOARD=waveshare`.
+
+Other branches: `feature/nvs-config` (parked work).
 
 ## Build
 
 Requirements: [ESP-IDF v5.3.1](https://docs.espressif.com/projects/esp-idf/en/v5.3.1/esp32s3/get-started/)
 and network access on the first build (libpeer and the managed components are
-downloaded). The target (`esp32s3`) and every build option come from
+downloaded; the waveshare line's components are pinned in
+`dependencies.lock.waveshare`). The target (`esp32s3`) and every build option come from
 `sdkconfig.defaults` — a fresh clone builds the same image as the released one.
 
 ```sh
@@ -39,10 +53,11 @@ export PIPECAT_SMALLWEBRTC_URL="https://<bot-host>:7860/api/offer"
 export WIFI_SSID="" WIFI_PASSWORD=""   # empty: the node reads Wi-Fi from its NVS (normal)
 idf.py -B build/array -DBOARD=array build   # -> build/array/array_esp32.bin
 idf.py -B build/flex  -DBOARD=flex  build   # -> build/flex/flex_esp32.bin
+idf.py -B build/waveshare -DBOARD=waveshare build   # -> build/waveshare/waveshare_esp32.bin
 ```
 
 `BOARD` is required (the build stops without it). Use one build directory per
-board so a cached setting never carries over from one line to the other.
+board so a cached setting never carries over from one line to another.
 
 Build environment variables:
 
@@ -56,6 +71,12 @@ Build environment variables:
   reports; rename nodes from the LenoxVI dashboard afterwards.
 - `LOG_DATACHANNEL_MESSAGES=1` (debug only) — logs every data-channel message
   to serial, including Wi-Fi settings. Never in a deployed image.
+- `MIC_LEVEL_LOG=1` (bench only, waveshare) — logs mic rms/peak to serial
+  once a second for 30 s after boot, to check a board's mic. Never in a
+  deployed image.
+
+Both debug options are opt-in by value (`=1`), and the lenoxvi deploy script
+refuses to publish an image built with either.
 
 ## Flashing
 
@@ -64,17 +85,19 @@ Build environment variables:
   `idf.py -p <port> flash`. Then set Wi-Fi and the node name from the LenoxVI
   dashboard; every later image can be credential-free.
 - **Updates:** over the air through the LenoxVI bot — the dashboard's Firmware
-  panel, or `scripts/deploy_firmware.sh --track array|flex` in the lenoxvi repo.
+  panel, or `scripts/deploy_firmware.sh --track array|flex|waveshare` in the
+  lenoxvi repo.
   A new image boots pending verification and rolls back automatically unless
   it reaches the bot within 5 minutes.
-- The XVF3800 audio chip runs its own XMOS firmware, flashed separately (see
-  the lenoxvi repo's bring-up docs).
+- On array/flex, the XVF3800 audio chip runs its own XMOS firmware, flashed
+  separately (see the lenoxvi repo's bring-up docs).
 
 ## Versions
 
 The version is `project(${BOARD}_esp32 VERSION X.Y.Z)` in `CMakeLists.txt` —
 the node compares it with the bot's manifest and updates when the manifest is
-newer. Both lines build from the same source, so they share version numbers.
+newer. All lines build from the same source, so they share version numbers;
+a node only updates when its own line's track serves a newer image.
 
 ## Third-party code
 
@@ -86,3 +109,7 @@ newer. Both lines build from the same source, so they share version numbers.
 - `deps/libpeer` — [libpeer](https://github.com/sepfy/libpeer) (MIT), fetched
   at a pinned commit and patched by `scripts/fetch_libpeer.sh`;
   `components/peer` is its ESP-IDF build glue.
+- waveshare line only, downloaded by the ESP-IDF component manager (all
+  Apache-2.0): `espressif/esp_codec_dev` (ES7210 driver),
+  `espressif/esp_io_expander` + `esp_io_expander_tca95xx_16bit` (TCA9555),
+  `espressif/led_strip` (WS2812 ring).
