@@ -66,8 +66,9 @@ static int        s_lvl_reads;
 static esp_err_t fail(const char *step, esp_err_t err) {
     ESP_LOGE(TAG, "board_audio: %s failed: %s", step, esp_err_to_name(err));
     s_dead = true;
-    /* Whatever failed, never leave the speaker PA on (best effort). */
-    if (s_io_exp) esp_io_expander_set_level(s_io_exp, EXIO_PA_EN, 0);
+    /* Whatever failed, never leave the speaker PA on (best effort). Write the
+     * output register directly: works whatever the pin direction is. */
+    if (s_io_exp) s_io_exp->write_output_reg(s_io_exp, 0xFFFF & ~(uint32_t)EXIO_PA_EN);
     return err;
 }
 

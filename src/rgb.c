@@ -7,8 +7,7 @@ static const char *TAG = "rgb";
 
 #if LENOXVI_BOARD_WAVESHARE  /* waveshare: WS2812 ring in the board component renders the same table */
 #include "board_led.h"
-/* media.cpp's mute state; pipecat_mic_muted() itself has C++ linkage */
-extern bool pipecat_mic_muted_c(void);
+#include "mic_mute_c.h"   /* pipecat_mic_muted_c(): media.cpp's mute state */
 #endif
 
 /* ── reSpeaker XVF3800 LED ring over I2C ──────────────────────────────────

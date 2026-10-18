@@ -820,5 +820,6 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
     s_au_frames = s_au_frames + 1;
 }
 #if LENOXVI_BOARD_WAVESHARE  /* waveshare: C-linkage mute read for the LED ring (rgb.c pixel 0) */
+#include "mic_mute_c.h"
 extern "C" bool pipecat_mic_muted_c(void) { return mic_mute.load(); }
 #endif

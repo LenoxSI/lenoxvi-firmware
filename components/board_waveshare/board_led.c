@@ -100,7 +100,7 @@ static void led_task(void *arg) {
         portEXIT_CRITICAL(&s_lock);
 
         bool breathing = t.effect == EFFECT_BREATHING;
-        if (dirty || breathing) render(&t, (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+        if (dirty || breathing) render(&t, (uint32_t)((uint64_t)xTaskGetTickCount() * portTICK_PERIOD_MS));
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(breathing ? FRAME_MS : IDLE_WAIT_MS));
     }
 }
