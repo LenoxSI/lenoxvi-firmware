@@ -5,7 +5,12 @@
 
 static const char *TAG = "rgb";
 
-#if !LENOXVI_BOARD_WAVESHARE  /* waveshare: no XVF LED ring — effect table + I2C bridge not built */
+#if LENOXVI_BOARD_WAVESHARE  /* waveshare: WS2812 ring in the board component renders the same table */
+#include "board_led.h"
+/* media.cpp's mute state; pipecat_mic_muted() itself has C++ linkage */
+extern bool pipecat_mic_muted_c(void);
+#endif
+
 /* ── reSpeaker XVF3800 LED ring over I2C ──────────────────────────────────
  * The 12-LED ring on the reSpeaker board is owned and driven by the XMOS,
  * NOT by a WS2812 strip on the ESP32 (that was the Waveshare board's setup —
@@ -39,6 +44,7 @@ typedef struct {
     uint32_t color;   /* GPO cmd 16 value (0x00RRGGBB) */
 } led_effect_t;
 
+#if !LENOXVI_BOARD_WAVESHARE  /* waveshare: no XVF — I2C bridge + register writes not built */
 #define XVF_GPO_RESID        20
 #define XVF_CMD_LED_EFFECT   12
 #define XVF_CMD_LED_BRIGHT   13
@@ -66,6 +72,7 @@ static esp_err_t led_set_color(uint32_t rgb) {
                           (uint8_t)((rgb >> 16) & 0xFF), (uint8_t)((rgb >> 24) & 0xFF)};
     return xvf_led_write(XVF_CMD_LED_COLOR, payload, 4);
 }
+#endif
 
 static const led_effect_t *effect_for(rgb_state_t s) {
     static const led_effect_t EFF_BOOT       = {1, 255, 0x0000FF};
@@ -89,15 +96,9 @@ static const led_effect_t *effect_for(rgb_state_t s) {
         default:                        return &EFF_DARK;
     }
 }
-#endif
 
 // ── Shared state ──────────────────────────────────────────────
 static volatile rgb_state_t current_state = RGB_STATE_BOOT;
-#if LENOXVI_BOARD_WAVESHARE  /* waveshare: no LED ring driver yet — no render task, state only tracked */
-void rgb_init(void) {
-    ESP_LOGI(TAG, "rgb: waveshare build — no LED ring driver yet, state tracked only");
-}
-#else
 static volatile rgb_state_t rendered_state = RGB_STATE_DARK;
 
 // ── State priority ───────────────────────────────────────────
@@ -113,6 +114,7 @@ static bool should_switch(rgb_state_t proposed) {
     return proposed >= current_state;
 }
 
+#if !LENOXVI_BOARD_WAVESHARE  /* waveshare: its own render task below (no XVF bus) */
 // ── Render task ──────────────────────────────────────────────
 
 static void rgb_task(void *arg) {
@@ -182,6 +184,43 @@ void rgb_init(void) {
     BaseType_t ok = xTaskCreate(rgb_task, "rgb", 4096, NULL, 4, NULL);
     if (ok != pdPASS) ESP_LOGE(TAG, "rgb task spawn failed");
 #endif
+}
+#else
+// ── Render task (waveshare) ──────────────────────────────────
+// Same cadence and switch rule as the array's rgb_task; the WS2812 ring is
+// up at boot (RMT), so there is no bus wait and nothing to retry. The mute
+// state is polled here and shown on pixel 0 (the array's red mute LED).
+
+static void rgb_task(void *arg) {
+    for (;;) {
+        board_led_set_muted(pipecat_mic_muted_c());
+        rgb_state_t s = current_state;
+
+        if (s != rendered_state) {
+            if (!should_switch(s)) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+            const led_effect_t *eff = effect_for(s);
+            board_led_set(eff->effect, eff->brightness, eff->color);
+            rendered_state = s;
+            ESP_LOGI(TAG, "LED state -> %d (effect=%u bright=%u)", (int)s,
+                     (unsigned)eff->effect, (unsigned)eff->brightness);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+// ── Public API ────────────────────────────────────────────────
+
+void rgb_init(void) {
+    /* Fails soft: on error board_led_* are no-ops and the task just tracks state. */
+    board_led_init();
+    current_state = RGB_STATE_BOOT;
+    rendered_state = RGB_STATE_DARK;
+    BaseType_t ok = xTaskCreate(rgb_task, "rgb", 4096, NULL, 4, NULL);
+    if (ok != pdPASS) ESP_LOGE(TAG, "rgb task spawn failed");
 }
 #endif
 
