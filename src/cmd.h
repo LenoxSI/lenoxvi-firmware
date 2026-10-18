@@ -26,6 +26,12 @@ void cmd_send_simple(const char *cmd, bool ok, const char *note);
 void cmd_push_firmware_version(void);
 void cmd_service_mute_push(void);   /* H4: send a pending button mute change */
 
+#if LENOXVI_BOARD_WAVESHARE
+/* Board-only commands (set_speaker), tried before "unknown cmd" via the
+ * LENOXVI_CMD_BOARD_EXT hook. Returns true when it handled (and answered). */
+bool cmd_board_handle(const char *cmd, const cJSON *msg);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

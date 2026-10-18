@@ -696,7 +696,7 @@ void pipecat_audio_decode(uint8_t *data, size_t size) {
     if (size <= 3) { is_playing = false; return; }
     int n = opus_decode(opus_decoder, data, size, decoder_buffer, PCM_MONO_SAMPLES, 0);
     if (n <= 0) return;
-    update_is_playing(decoder_buffer, n);
+    update_is_playing(decoder_buffer, n); LENOXVI_SPEAKER_PLAY(decoder_buffer, n);  /* waveshare: built-in speaker */
 }
 
 /* ── Opus encoder (mic in) ──────────────────────────────────────────────── */

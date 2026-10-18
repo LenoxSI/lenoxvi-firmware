@@ -62,3 +62,16 @@ extern bool pipecat_ota_pending_verify(void);
 extern bool pipecat_ota_rejected_version(char *out, size_t out_len);
 extern bool pipecat_ota_busy(void);
 extern void pipecat_ota_defer_drop(void);
+
+// Waveshare built-in speaker hooks, called on EXISTING lines of media.cpp
+// (decoded bot audio -> speaker) and cmd.cpp (set_speaker -> cmd_board_handle,
+// cmd.h). Empty on array/flex, so those sources keep every line number (their
+// ESP_ERROR_CHECK __LINE__ values are baked into the image) and every byte.
+// (Not CMake definitions: CMake drops function-style -D macros.)
+#if LENOXVI_BOARD_WAVESHARE
+#define LENOXVI_SPEAKER_PLAY(pcm, n) board_audio_play(pcm, n)
+#define LENOXVI_CMD_BOARD_EXT(cmd, msg) else if (cmd_board_handle(cmd, msg)) {}
+#else
+#define LENOXVI_SPEAKER_PLAY(pcm, n)
+#define LENOXVI_CMD_BOARD_EXT(cmd, msg)
+#endif

@@ -293,7 +293,7 @@ bool pipecat_cmd_handle(const cJSON *msg) {
       vTaskDelay(pdMS_TO_TICKS(300));  /* let the ack leave the wire */
       boot_diag_restart("set-wifi");
     }
-  } else {
+  } LENOXVI_CMD_BOARD_EXT(cmd, msg) else {  /* waveshare: set_speaker (cmd_board_handle) */
     ESP_LOGW(TAG, "unknown cmd: %s", cmd);
     cmd_send_simple(cmd, false, "unknown cmd");
   }
@@ -346,3 +346,43 @@ void cmd_liveness_start(void) {
                                 4096 / sizeof(StackType_t), NULL, 3,
                                 stack, &buf, 0);
 }
+
+#if LENOXVI_BOARD_WAVESHARE  /* waveshare: built-in speaker control (cmd_board_handle, cmd.h) */
+#include "board_audio.h"
+/* set_speaker: {"enabled": bool, "volume": 0..100 (optional, default: keep,
+ * clamped)}. Applies at once; NOT persisted (no NVS — a reboot comes back
+ * disabled at volume 40). Echoes the resulting state, like set_mute. */
+bool cmd_board_handle(const char *cmd, const cJSON *msg) {
+  if (strcmp(cmd, "set_speaker") != 0) return false;
+  const cJSON *j_en = cJSON_GetObjectItem(msg, "enabled");
+  const cJSON *j_vol = cJSON_GetObjectItem(msg, "volume");
+  if (j_en == NULL) {
+    cmd_send_simple("set_speaker", false, "missing enabled");
+    return true;
+  }
+  if (!cJSON_IsBool(j_en)) {
+    cmd_send_simple("set_speaker", false, "enabled must be bool");
+    return true;
+  }
+  if (j_vol != NULL && !cJSON_IsNumber(j_vol)) {
+    cmd_send_simple("set_speaker", false, "volume must be a number");
+    return true;
+  }
+  bool enabled = cJSON_IsTrue(j_en);
+  int volume = board_audio_speaker_volume();
+  if (j_vol != NULL) {
+    double v = j_vol->valuedouble;
+    volume = v < 0 ? 0 : v > 100 ? 100 : (int)v;
+  }
+  board_audio_speaker_set(enabled, volume);
+  char reply[192];
+  snprintf(reply, sizeof(reply),
+           "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\","
+           "\"cmd\":\"set_speaker\",\"ok\":true,"
+           "\"data\":{\"enabled\":%s,\"volume\":%d,\"speaker_ok\":%s}}",
+           enabled ? "true" : "false", board_audio_speaker_volume(),
+           board_audio_speaker_ok() ? "true" : "false");
+  pipecat_rtvi_send_raw(reply);
+  return true;
+}
+#endif
