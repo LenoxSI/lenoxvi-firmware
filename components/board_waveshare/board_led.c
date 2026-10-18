@@ -111,7 +111,7 @@ esp_err_t board_led_init(void) {
         .strip_gpio_num = LED_GPIO,
         .max_leds = LED_COUNT,
         .led_model = LED_MODEL_WS2812,
-        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_RGB,  /* this ring is RGB-order (WS2812B-0807): GRB swapped red/green on hardware */
         .flags = { .invert_out = false },
     };
     led_strip_rmt_config_t rmt_cfg = {
