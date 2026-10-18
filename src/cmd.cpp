@@ -152,7 +152,7 @@ void cmd_push_firmware_version(void) {
   const esp_app_desc_t *app_desc = esp_app_get_description();
   char reply[256];
   /* "line" (1.2.19): the board line this image was built for — the same
-   * compiled-in XVF_OTA_TRACK the OTA board guard uses ("array"|"flex"),
+   * compiled-in XVF_OTA_TRACK the OTA board guard uses (array|flex|waveshare),
    * so the dashboard can label each node's hardware. */
   /* if the bootloader rolled back from a version, say which —
    * "rejected" rides alongside "fw" (the bot ignores unknown keys today;

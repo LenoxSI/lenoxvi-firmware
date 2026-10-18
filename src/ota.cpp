@@ -87,14 +87,14 @@ static int compare_versions(const char *local, const char *remote) {
 }
 
 /* OTA track (one name per firmware line, 2026-10-16): each line's
- * CMakeLists hard-codes XVF_OTA_TRACK ("array" | "flex"), so an image only
+ * CMakeLists hard-codes XVF_OTA_TRACK (array | flex | waveshare), so an image only
  * ever reads /firmware/<its track>/version and can never pick up the other
  * line's manifest. Never env-driven, and no silent fallback: a build without
  * a track is a compile error. (The bot still serves the old track-less
  * /firmware/version for array images <= 1.2.8 — that URL is not built
  * into any new image.) */
 #ifndef XVF_OTA_TRACK
-#error "XVF_OTA_TRACK must be set by the firmware line's CMakeLists (array | flex)"
+#error "XVF_OTA_TRACK must be set by the firmware line's CMakeLists (array | flex | waveshare)"
 #endif
 #define FW_URL_FMT "%.*s/firmware/" XVF_OTA_TRACK "/%s"
 

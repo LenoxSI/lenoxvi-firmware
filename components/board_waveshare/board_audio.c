@@ -66,11 +66,29 @@ static int        s_lvl_reads;
 static esp_err_t fail(const char *step, esp_err_t err) {
     ESP_LOGE(TAG, "board_audio: %s failed: %s", step, esp_err_to_name(err));
     s_dead = true;
+    /* Whatever failed, never leave the speaker PA on (best effort). */
+    if (s_io_exp) esp_io_expander_set_level(s_io_exp, EXIO_PA_EN, 0);
     return err;
+}
+
+/* Silence at the real frame rate: the capture loop adds its own delay after
+ * each frame, so pace to an absolute 20 ms schedule instead of sleeping a
+ * fixed 20 ms on top of it (that gave ~28 frames/s, not 50). */
+static void pace_silence(void) {
+    static TickType_t last;
+    TickType_t now = xTaskGetTickCount();
+    if (last == 0 || now - last > pdMS_TO_TICKS(100)) last = now;  /* (re)start the schedule */
+    vTaskDelayUntil(&last, pdMS_TO_TICKS(20));
 }
 
 esp_err_t board_audio_init(void) {
     esp_err_t err;
+    /* One-shot: a second call must not tear down a working mic (bus and
+     * channel already exist). After a failed init it stays dead (no
+     * cleanup of partially created handles; a reboot is the retry). */
+    static bool attempted;
+    if (attempted) return s_dead ? ESP_ERR_INVALID_STATE : ESP_OK;
+    attempted = true;
     s_dead = true;
 
     s_stereo32 = heap_caps_malloc(MAX_FRAMES * 2 * sizeof(int32_t),
@@ -94,6 +112,12 @@ esp_err_t board_audio_init(void) {
     err = esp_io_expander_new_i2c_tca95xx_16bit(
         s_i2c_bus, ESP_IO_EXPANDER_I2C_TCA9555_ADDRESS_000, &s_io_exp);
     if (err != ESP_OK) return fail("tca9555 new", err);
+    /* The driver's reset leaves the OUTPUT register at 0xFFFF, so switching
+     * pin 8 to output would turn the PA on until the next write. Write the
+     * register with PA low FIRST (set_level refuses input pins), then
+     * switch directions. */
+    err = s_io_exp->write_output_reg(s_io_exp, 0xFFFF & ~(uint32_t)EXIO_PA_EN);
+    if (err != ESP_OK) return fail("tca9555 PA low (pre-dir)", err);
     err = esp_io_expander_set_dir(s_io_exp, EXIO_CODEC_EN | EXIO_PA_EN,
                                   IO_EXPANDER_OUTPUT);
     if (err != ESP_OK) return fail("tca9555 set_dir", err);
@@ -207,7 +231,7 @@ static void mic_level_accumulate(const int16_t *s, int n) {
 bool board_audio_read(int16_t *out, int n) {
     if (s_dead || n <= 0 || n > MAX_FRAMES) {
         memset(out, 0, (size_t)(n > 0 ? n : 0) * sizeof(int16_t));
-        vTaskDelay(pdMS_TO_TICKS(20));
+        pace_silence();
         return false;
     }
     int rc = esp_codec_dev_read(s_mic_dev, s_stereo32, n * 2 * (int)sizeof(int32_t));
@@ -223,7 +247,7 @@ bool board_audio_read(int16_t *out, int n) {
         memset(out, 0, (size_t)n * sizeof(int16_t));
         /* Keep the 20 ms pacing: a read that fails instantly must not turn
          * the capture loop (prio 7) into a busy spin -> task-WDT reboot loop. */
-        vTaskDelay(pdMS_TO_TICKS(20));
+        pace_silence();
         return false;
     }
     /* stereo32 -> mono16: left channel, high 16 bits */
