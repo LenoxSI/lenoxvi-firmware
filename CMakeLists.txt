@@ -1,22 +1,26 @@
 cmake_minimum_required(VERSION 3.19)
 
-# Board / firmware line (2026-10-16 branch fold): ONE source tree builds both
-# lines; the line is chosen per build and is REQUIRED — there is no default:
-#   idf.py -B build/array -DBOARD=array build    # XVF3800 mic-array board
-#   idf.py -B build/flex  -DBOARD=flex  build    # reSpeaker Flex
+# Board / firmware line (2026-10-16 branch fold): ONE source tree builds every
+# line; the line is chosen per build and is REQUIRED — there is no default:
+#   idf.py -B build/array     -DBOARD=array     build  # XVF3800 mic-array board
+#   idf.py -B build/flex      -DBOARD=flex      build  # reSpeaker Flex
+#   idf.py -B build/waveshare -DBOARD=waveshare build  # Waveshare ESP32-S3-AUDIO (no XVF)
 # BOARD drives the image's whole identity: OTA track URL (/firmware/<board>/),
 # project name (<board>_esp32 — a node refuses an OTA image with another name,
-# fw M4) and the board-specific code paths (LENOXVI_BOARD_ARRAY/FLEX). Give each
-# board its own build dir (-B build/<board>) so a cached value can't leak.
-set(BOARD "" CACHE STRING "firmware line: array | flex")
-if(NOT BOARD STREQUAL "array" AND NOT BOARD STREQUAL "flex")
-  message(FATAL_ERROR "BOARD must be set: idf.py -B build/<board> -DBOARD=array|flex build (got '${BOARD}')")
+# fw M4) and the board-specific code paths (LENOXVI_BOARD_ARRAY/FLEX/WAVESHARE).
+# Give each board its own build dir (-B build/<board>) so a cached value can't
+# leak.
+set(BOARD "" CACHE STRING "firmware line: array | flex | waveshare")
+if(NOT BOARD STREQUAL "array" AND NOT BOARD STREQUAL "flex" AND NOT BOARD STREQUAL "waveshare")
+  message(FATAL_ERROR "BOARD must be set: idf.py -B build/<board> -DBOARD=array|flex|waveshare build (got '${BOARD}')")
 endif()
 add_compile_definitions(XVF_OTA_TRACK="${BOARD}")
 if(BOARD STREQUAL "array")
   add_compile_definitions(LENOXVI_BOARD_ARRAY=1)
-else()
+elseif(BOARD STREQUAL "flex")
   add_compile_definitions(LENOXVI_BOARD_FLEX=1)
+elseif(BOARD STREQUAL "waveshare")
+  add_compile_definitions(LENOXVI_BOARD_WAVESHARE=1)
 endif()
 
 if(NOT IDF_TARGET STREQUAL linux)
@@ -58,6 +62,15 @@ add_compile_definitions(CONFIG_MAX_NALU_SIZE=1500)
 
 set(COMPONENTS src)
 set(EXTRA_COMPONENT_DIRS "src" "components/srtp" "components/peer" "components/esp-libopus")
+# Waveshare line: its codec/IO-expander code lives in its own component,
+# which array/flex never see — the project's components/ dir is scanned by
+# default, so array/flex exclude it explicitly (else its manifest changes
+# their dependencies.lock manifest_hash).
+if(BOARD STREQUAL "waveshare")
+  list(APPEND EXTRA_COMPONENT_DIRS "components/board_waveshare")
+else()
+  list(APPEND EXCLUDE_COMPONENTS board_waveshare)
+endif()
 
 if(IDF_TARGET STREQUAL linux)
   add_compile_definitions(LINUX_BUILD=1)
@@ -69,4 +82,14 @@ if(IDF_TARGET STREQUAL linux)
 endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# Waveshare line: its own managed-component lock (its codec deps differ from
+# array/flex), and a build property src/CMakeLists.txt reads to REQUIRE
+# board_waveshare — component CMakeLists are first evaluated in script mode
+# where BOARD isn't visible, only build properties are. Both must sit after
+# project.cmake (defines idf_build_set_property) and before project() (IDF 5.3
+# component-manager guide, DEPENDENCIES_LOCK).
+if(BOARD STREQUAL "waveshare")
+  idf_build_set_property(DEPENDENCIES_LOCK "${CMAKE_SOURCE_DIR}/dependencies.lock.waveshare")
+  idf_build_set_property(LENOXVI_BOARD "waveshare")
+endif()
 project(${BOARD}_esp32 VERSION 1.2.29)

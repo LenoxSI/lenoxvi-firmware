@@ -31,6 +31,9 @@
 #include "esp_timer.h"
 #include "cmd_json.h"
 #include "settings.h"
+#if LENOXVI_BOARD_WAVESHARE  /* waveshare: no XVF — mic comes from the board component */
+#include "board_audio.h"
+#endif
 
 /* ── Pins / addresses (XIAO-integrated reSpeaker, Seeed porting config) ── */
 #define I2C_PORT      I2C_NUM_0
@@ -67,11 +70,13 @@
 #define HW48_STEREO32_BYTES      (HW48_MONO_SAMPLES * 2 * 4)   /* 7680 B / 20ms */
 
 /* ── Handles ────────────────────────────────────────────────────────────── */
+#if !LENOXVI_BOARD_WAVESHARE  /* waveshare: no XVF I2C/I2S here — board_waveshare owns them */
 static i2c_master_bus_handle_t i2c_bus  = NULL;
 static i2s_chan_handle_t        tx_chan  = NULL;
 static i2s_chan_handle_t        rx_chan  = NULL;
 static i2s_std_config_t         g_std_cfg;    /* saved for full I2S re-init (heal) */
 static i2s_chan_config_t        g_chan_cfg;
+#endif
 static std::atomic<bool>        is_playing = false;
 
 /* Mic mute (H4, 2026-10-16) — ONE state per node, both boards:
@@ -117,6 +122,7 @@ static void update_is_playing(int16_t *buf, size_t n) {
     is_playing = false;
 }
 
+#if !LENOXVI_BOARD_WAVESHARE  /* waveshare: no XVF3800 — no control plane, LED bridge or button pins */
 /* ── XVF3800 control plane (ported from Kyzcreig's proven implementation) ──
  * All XVF3800 DSP state is VOLATILE: lost on every XMOS power-cycle/DFU.
  * The stock firmware boots with default routing (conferencing post-proc,
@@ -240,6 +246,7 @@ static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd, uint8_t *out, size_t
 #define XVF_RESID_IO_CONFIG      36
 #define XVF_CMD_GPI_VALUE_ALL     6
 #define XVF_GPI_BUTTON_BIT        0
+#endif
 static volatile int s_dbg_btn = -1;
 extern "C" void pipecat_mute_hw_diag(int *btn) { *btn = s_dbg_btn; }
 
@@ -257,10 +264,12 @@ static volatile uint32_t s_au_max_work_us = 0;
 static volatile uint32_t s_au_max_gap_us = 0;
 static volatile int s_au_core = -1;
 
+#if !LENOXVI_BOARD_WAVESHARE  /* waveshare: no I2S channel here to hook (ovf stays 0) */
 static bool on_mic_queue_overflow(i2s_chan_handle_t, i2s_event_data_t *, void *) {
   s_au_ovf = s_au_ovf + 1;   /* ISR context: count only */
   return false;              /* no task woken */
 }
+#endif
 
 extern "C" void pipecat_audio_stats(cmd_audio_stats_t *out) {
   out->core = s_au_core;
@@ -272,6 +281,18 @@ extern "C" void pipecat_audio_stats(cmd_audio_stats_t *out) {
   s_au_max_gap_us = 0;
 }
 
+#if LENOXVI_BOARD_WAVESHARE  /* waveshare: no XVF button task, DSP profile or I2S bring-up */
+/* Waveshare: no XVF, no LED ring — nothing needs an early I2C bus. */
+void pipecat_init_i2c_early() {}
+
+/* Codec power, mic ADC and I2S RX all live in board_waveshare. It never
+ * aborts: on failure board_audio_read() keeps delivering silence. */
+void pipecat_init_audio_capture() {
+    esp_err_t err = board_audio_init();
+    if (err != ESP_OK)
+        ESP_LOGE(LOG_TAG, "board_audio_init: %s — mic sends silence", esp_err_to_name(err));
+}
+#else
 #if LENOXVI_BOARD_ARRAY
 /* Own task (1.2.15): the button poll used to ride the LED task, whose loop
  * stalls for 100-1000 ms while it renders (wake/listen/speak states) — quick
@@ -648,6 +669,7 @@ void pipecat_init_audio_capture() {
      * 1.2.21's 1.5 s settle was a guess and lost the race). */
     mute_task_start();
 }
+#endif
 
 /* ── Opus decoder — incoming bot audio (decoded for turn-lock only) ─────── */
 static opus_int16 *decoder_buffer = NULL;
@@ -696,6 +718,19 @@ void pipecat_init_audio_encoder() {
 }
 
 void pipecat_send_audio(PeerConnection *peer_connection) {
+#if LENOXVI_BOARD_WAVESHARE  /* waveshare: the board component hands over 16 kHz mono directly — no 48k decimation/heal */
+    if (mic_mono16 == NULL) return;
+    board_audio_read(mic_mono16, PCM_MONO_SAMPLES);   /* blocks ~20 ms; silence on failure */
+    /* audio-loop health: gap since the previous frame read, then work time */
+    const int64_t t_read = esp_timer_get_time();
+    static int64_t t_prev_read = 0;
+    if (t_prev_read) {
+        uint32_t gap = (uint32_t)(t_read - t_prev_read);
+        if (gap > s_au_max_gap_us) s_au_max_gap_us = gap;
+    }
+    t_prev_read = t_read;
+    s_au_core = xPortGetCoreID();
+#else
     size_t bytes_read = 0;
     /* 48k bus: 20ms = 960 stereo32 frames (7680B). The 16k image fills one
      * frame in three; the read path below is phase-independent. */
@@ -767,6 +802,7 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
         diag_peak_hi = 0;
         diag_peak_lo = 0;
     }
+#endif
     if (is_playing) { memset(mic_mono16, 0, PCM_MONO_BYTES); }
     /* Mic mute (H4): same zeroing as the turn lock — when muted the encoder
      * sees silence (7-byte DTX frames on the wire). On array the XMOS has

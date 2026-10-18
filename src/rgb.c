@@ -5,6 +5,7 @@
 
 static const char *TAG = "rgb";
 
+#if !LENOXVI_BOARD_WAVESHARE  /* waveshare: no XVF LED ring — effect table + I2C bridge not built */
 /* ── reSpeaker XVF3800 LED ring over I2C ──────────────────────────────────
  * The 12-LED ring on the reSpeaker board is owned and driven by the XMOS,
  * NOT by a WS2812 strip on the ESP32 (that was the Waveshare board's setup —
@@ -88,9 +89,15 @@ static const led_effect_t *effect_for(rgb_state_t s) {
         default:                        return &EFF_DARK;
     }
 }
+#endif
 
 // ── Shared state ──────────────────────────────────────────────
 static volatile rgb_state_t current_state = RGB_STATE_BOOT;
+#if LENOXVI_BOARD_WAVESHARE  /* waveshare: no LED ring driver yet — no render task, state only tracked */
+void rgb_init(void) {
+    ESP_LOGI(TAG, "rgb: waveshare build — no LED ring driver yet, state tracked only");
+}
+#else
 static volatile rgb_state_t rendered_state = RGB_STATE_DARK;
 
 // ── State priority ───────────────────────────────────────────
@@ -176,6 +183,7 @@ void rgb_init(void) {
     if (ok != pdPASS) ESP_LOGE(TAG, "rgb task spawn failed");
 #endif
 }
+#endif
 
 void rgb_set_state(rgb_state_t new_state) {
     current_state = new_state;
