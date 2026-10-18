@@ -65,7 +65,7 @@
 #define SPK_PREBUF       960    /* 60 ms buffered before playback starts */
 #define SPK_REARM_MS     100    /* dry this long -> wait for the prebuffer again */
 #define SPK_PA_HOLD_MS   1000   /* silence/underrun this long -> PA off */
-#define SPK_WRITE_TO_MS  100    /* i2s_channel_write timeout (one frame is 20 ms) */
+#define SPK_WRITE_TO_MS  100    /* i2s_channel_write timeout in ms (NOT ticks; a frame is 20 ms) */
 #define SPK_TASK_PRIO    5      /* below the capture task (7) */
 #define SPK_TASK_STACK   4096   /* LOG (vfprintf) inside the I2C PA write path */
 #define SPK_DEFAULT_VOL  40
@@ -267,10 +267,21 @@ static void spk_task(void *arg) {
             s_spk_frame[2 * i] = v;
             s_spk_frame[2 * i + 1] = v;
         }
-        size_t written = 0;
-        esp_err_t err = i2s_channel_write(s_tx_chan, s_spk_frame,
-                                          SPK_FRAME * 2 * sizeof(int32_t), &written,
-                                          pdMS_TO_TICKS(SPK_WRITE_TO_MS));
+        /* i2s_channel_write's timeout is in MILLISECONDS, not ticks. Passing
+         * pdMS_TO_TICKS(100) (= 10 at the 100 Hz tick) made writes give up
+         * after 10 ms — less than one DMA buffer frees — and the rest of the
+         * frame was dropped: choppy "bad radio" playback. A partial write
+         * now finishes the frame; only a real SPK_WRITE_TO_MS stall bails. */
+        const uint8_t *p = (const uint8_t *)s_spk_frame;
+        size_t left = SPK_FRAME * 2 * sizeof(int32_t);
+        esp_err_t err = ESP_OK;
+        while (left > 0) {
+            size_t written = 0;
+            err = i2s_channel_write(s_tx_chan, p, left, &written, SPK_WRITE_TO_MS);
+            p += written;
+            left -= written;
+            if (err != ESP_OK) break;
+        }
         if (err != ESP_OK) {
             if (last_warn == 0 || now - last_warn >= pdMS_TO_TICKS(1000)) {
                 last_warn = now ? now : 1;
