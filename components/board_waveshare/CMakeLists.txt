@@ -1,4 +1,4 @@
 idf_component_register(
-    SRCS "board_audio_stub.c"
+    SRCS "board_audio.c"
     INCLUDE_DIRS "include"
-    REQUIRES freertos esp_common log)
+    REQUIRES esp_driver_i2c esp_driver_i2s esp_codec_dev esp_io_expander_tca95xx_16bit log freertos)

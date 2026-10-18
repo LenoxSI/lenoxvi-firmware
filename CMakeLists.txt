@@ -50,6 +50,12 @@ if("$ENV{LOG_DATACHANNEL_MESSAGES}" STREQUAL "1")
   add_compile_definitions(LOG_DATACHANNEL_MESSAGES="1")
 endif()
 
+# Bench-only: per-second mic rms/peak log for the first 30 s (waveshare
+# board_audio.c). Same opt-in by VALUE (=1).
+if("$ENV{MIC_LEVEL_LOG}" STREQUAL "1")
+  add_compile_definitions(MIC_LEVEL_LOG=1)
+endif()
+
 add_compile_definitions(PIPECAT_SMALLWEBRTC_URL="$ENV{PIPECAT_SMALLWEBRTC_URL}")
 
 # libpeer reserves a STATIC H.264 reassembly buffer (rtp.c nalu_buf,

@@ -702,7 +702,9 @@ void pipecat_audio_decode(uint8_t *data, size_t size) {
 /* ── Opus encoder (mic in) ──────────────────────────────────────────────── */
 static OpusEncoder *opus_encoder          = NULL;
 static uint8_t     *encoder_output_buffer = NULL;
+#if !LENOXVI_BOARD_WAVESHARE  /* waveshare: no 48k bus — board_audio_read() delivers 16k mono */
 static int32_t     *mic_stereo48          = NULL;
+#endif
 static int16_t     *mic_mono16            = NULL;
 
 void pipecat_init_audio_encoder() {
@@ -712,7 +714,9 @@ void pipecat_init_audio_encoder() {
     opus_encoder_ctl(opus_encoder, OPUS_SET_BITRATE(OPUS_ENCODER_BITRATE));
     opus_encoder_ctl(opus_encoder, OPUS_SET_COMPLEXITY(OPUS_ENCODER_COMPLEXITY));
     opus_encoder_ctl(opus_encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+#if !LENOXVI_BOARD_WAVESHARE  /* waveshare: skip the unused ~7.6 KB 48k buffer */
     mic_stereo48          = (int32_t *)heap_caps_malloc(HW48_STEREO32_BYTES, MALLOC_CAP_DEFAULT);
+#endif
     mic_mono16            = (int16_t *)malloc(PCM_MONO_BYTES);
     encoder_output_buffer = (uint8_t *)malloc(OPUS_BUFFER_SIZE);
 }
