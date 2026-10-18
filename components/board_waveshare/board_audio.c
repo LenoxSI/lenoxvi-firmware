@@ -67,9 +67,11 @@
 #define SPK_PA_HOLD_MS   1000   /* silence/underrun this long -> PA off */
 #define SPK_WRITE_TO_MS  100    /* i2s_channel_write timeout (one frame is 20 ms) */
 #define SPK_TASK_PRIO    5      /* below the capture task (7) */
-#define SPK_TASK_STACK   3072
+#define SPK_TASK_STACK   4096   /* LOG (vfprintf) inside the I2C PA write path */
 #define SPK_DEFAULT_VOL  40
 #define SPK_MIC_HOLD_MS  300    /* mic stays muted this long after audible playback */
+#define SPK_IDLE_FLUSH_MS 200   /* a sub-prebuffer fragment this stale is dropped */
+#define SPK_PA_RETRY_MS  500    /* back-off after a failed PA write */
 
 static i2c_master_bus_handle_t  s_i2c_bus;
 static esp_io_expander_handle_t s_io_exp;
@@ -86,12 +88,15 @@ static volatile int      s_spk_volume = SPK_DEFAULT_VOL;
 static int16_t          *s_ring;                        /* SPK_RING_SAMPLES */
 static int               s_ring_head;                   /* next write index */
 static int               s_ring_count;                  /* samples buffered */
-static uint32_t          s_spk_dropped;                 /* samples dropped (play) */
+static uint32_t          s_spk_overflow;                /* samples dropped: ring full */
 static portMUX_TYPE      s_ring_mux = portMUX_INITIALIZER_UNLOCKED;
 static int32_t          *s_spk_frame;                   /* SPK_FRAME * 2 slots */
+static int16_t          *s_spk_mono;                    /* SPK_FRAME (off the task stack) */
 static SemaphoreHandle_t s_spk_wake;                    /* play/set -> task */
 static SemaphoreHandle_t s_pa_lock;                     /* serialises PA writes */
 static bool              s_pa_on;
+static bool              s_pa_dirty;    /* last PA write failed: real level unknown */
+static TickType_t        s_pa_fail_at;  /* when it failed (retry back-off) */
 static volatile TickType_t s_spk_last_real;            /* last audible frame PLAYED */
 
 #ifdef MIC_LEVEL_LOG
@@ -130,17 +135,30 @@ static void pa_set(bool on) {
     if (s_io_exp == NULL || s_pa_lock == NULL) return;
     xSemaphoreTake(s_pa_lock, portMAX_DELAY);
     if (on && (!s_spk_enabled || !s_speaker_ok)) on = false;
-    if (on != s_pa_on) {
-        esp_err_t err = esp_io_expander_set_level(s_io_exp, EXIO_PA_EN, on ? 1 : 0);
+    TickType_t now = xTaskGetTickCount();
+    /* A failed write leaves the real level unknown (it may have latched):
+     * OFF is then always re-written, straight to the output register
+     * (the driver skips writes that match its cache). ON backs off. */
+    bool want = on != s_pa_on || (!on && s_pa_dirty);
+    if (want && on && s_pa_dirty && now - s_pa_fail_at < pdMS_TO_TICKS(SPK_PA_RETRY_MS)) want = false;
+    if (want) {
+        esp_err_t err = on || !s_pa_dirty
+            ? esp_io_expander_set_level(s_io_exp, EXIO_PA_EN, on ? 1 : 0)
+            : ESP_FAIL;
         if (err != ESP_OK && !on)
             err = s_io_exp->write_output_reg(s_io_exp, 0xFFFF & ~(uint32_t)EXIO_PA_EN);
         if (err == ESP_OK) {
             s_pa_on = on;
-            ESP_LOGI(TAG, "board_audio: PA %s (dropped %u)", on ? "on" : "off",
-                     (unsigned)s_spk_dropped);
+            s_pa_dirty = false;
+            ESP_LOGI(TAG, "board_audio: PA %s (ring overflow %u)", on ? "on" : "off",
+                     (unsigned)s_spk_overflow);
         } else {
-            ESP_LOGW(TAG, "board_audio: PA %s failed: %s", on ? "on" : "off",
-                     esp_err_to_name(err));
+            bool first = !s_pa_dirty;
+            s_pa_dirty = true;
+            s_pa_fail_at = now;
+            if (first)   /* once per failure streak — no 50/s flood */
+                ESP_LOGW(TAG, "board_audio: PA %s failed: %s", on ? "on" : "off",
+                         esp_err_to_name(err));
         }
     }
     xSemaphoreGive(s_pa_lock);
@@ -172,16 +190,35 @@ static int ring_pop(int16_t *out, int n) {
     return take;
 }
 
+/* Top the TX DMA up with silence until a write would block. Called on every
+ * idle -> playing transition: while idle the task writes nothing and the
+ * DMA (auto_clear) drains, so the first writes would otherwise return at once,
+ * empty the 60 ms prebuffer into DMA and leave a hole right after the first
+ * 60 ms of every reply. With the DMA full, i2s_channel_write paces the task
+ * and the ring keeps its slack (~75 ms extra latency, by design). */
+static void dma_fill_silence(void) {
+    memset(s_spk_frame, 0, SPK_FRAME * 2 * sizeof(int32_t));
+    for (int i = 0; i < 8; i++) {
+        size_t written = 0;
+        if (i2s_channel_write(s_tx_chan, s_spk_frame, SPK_FRAME * 2 * sizeof(int32_t),
+                              &written, 0) != ESP_OK || written == 0) break;
+    }
+}
+
 /* Playback: blocks on the wake semaphore while idle, on i2s_channel_write
  * (DMA-paced, 20 ms frames) while playing. Underruns play silence; after
  * SPK_REARM_MS dry it waits for the prebuffer again. */
 static void spk_task(void *arg) {
-    int16_t mono[SPK_FRAME];
+    int16_t *mono = s_spk_mono;
     bool primed = false;        /* prebuffer reached, draining the ring */
     int dry_ms = 0;             /* consecutive underrun while primed */
     TickType_t last_real = 0;   /* last non-silent frame (PA hold) */
     TickType_t last_warn = 0;
     for (;;) {
+        TickType_t now = xTaskGetTickCount();
+        TickType_t lr = s_spk_last_real;
+        if (lr != 0 && now - lr >= pdMS_TO_TICKS(SPK_MIC_HOLD_MS))
+            s_spk_last_real = 0;    /* hold over: no tick-wrap ghost mute later */
         if (!s_spk_enabled) {
             primed = false;
             ring_flush();
@@ -189,14 +226,21 @@ static void spk_task(void *arg) {
             xSemaphoreTake(s_spk_wake, pdMS_TO_TICKS(1000));
             continue;
         }
+        if (s_pa_dirty && !s_pa_on) pa_set(false);   /* retry a failed OFF */
         if (!primed && ring_avail() >= SPK_PREBUF) {
             primed = true;
             dry_ms = 0;
+            if (!s_pa_on) dma_fill_silence();   /* cold start: DMA paces from here */
         }
         if (!primed && !s_pa_on) {
             /* Idle: nothing to play and the PA is off — sleep until
-             * board_audio_play() or speaker_set wakes us. */
-            xSemaphoreTake(s_spk_wake, pdMS_TO_TICKS(1000));
+             * board_audio_play() or speaker_set wakes us. A fragment that
+             * never reaches the prebuffer is dropped once stale, so it
+             * can't play in front of the next reply. */
+            bool pending = ring_avail() > 0;
+            if (xSemaphoreTake(s_spk_wake, pdMS_TO_TICKS(pending ? SPK_IDLE_FLUSH_MS : 1000)) != pdTRUE
+                && pending && ring_avail() < SPK_PREBUF)
+                ring_flush();
             continue;
         }
         int got = primed ? ring_pop(mono, SPK_FRAME) : 0;
@@ -212,7 +256,6 @@ static void spk_task(void *arg) {
         for (int i = 0; i < got; i++) {
             if (mono[i] > 1 || mono[i] < -1) { real = true; break; }
         }
-        TickType_t now = xTaskGetTickCount();
         if (real) {
             last_real = now;
             s_spk_last_real = now ? now : 1;
@@ -255,9 +298,11 @@ static void speaker_init(const audio_codec_data_if_t *data_if) {
                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     s_spk_frame = heap_caps_malloc(SPK_FRAME * 2 * sizeof(int32_t),
                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_spk_mono = heap_caps_malloc(SPK_FRAME * sizeof(int16_t),
+                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     s_spk_wake = xSemaphoreCreateBinary();
     s_pa_lock = xSemaphoreCreateMutex();
-    if (!s_ring || !s_spk_frame || !s_spk_wake || !s_pa_lock) {
+    if (!s_ring || !s_spk_frame || !s_spk_mono || !s_spk_wake || !s_pa_lock) {
         speaker_fail("alloc");
         return;
     }
@@ -278,6 +323,12 @@ static void speaker_init(const audio_codec_data_if_t *data_if) {
         .codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC,
         .pa_pin = -1,         /* PA is on the TCA9555, driven here */
         .use_mclk = false,    /* the board clocks the ES8311 from BCLK */
+        /* With use_mclk=false the driver derives the codec clock as BCLK x8.
+         * Our slots are 32-bit stereo: BCLK = 64 fs = 1.024 MHz -> 8.192 MHz
+         * = 512 fs. mclk_div 512 picks the 8.192 MHz coefficient row
+         * (pre_div 2 -> 256 fs internally); the default 256 would set the
+         * dividers for half the real clock. */
+        .mclk_div = 512,
     };
     const audio_codec_if_t *codec_if = es8311_codec_new(&es8311_cfg);
     if (codec_if == NULL) { speaker_fail("es8311_codec_new"); return; }
@@ -315,10 +366,7 @@ static void speaker_init(const audio_codec_data_if_t *data_if) {
 
 void board_audio_play(const int16_t *pcm, int n) {
     if (pcm == NULL || n <= 0) return;
-    if (!s_speaker_ok || !s_spk_enabled) {
-        s_spk_dropped += (uint32_t)n;
-        return;
-    }
+    if (!s_speaker_ok || !s_spk_enabled) return;   /* replies may play elsewhere */
     portENTER_CRITICAL(&s_ring_mux);
     int space = SPK_RING_SAMPLES - s_ring_count;
     int take = n < space ? n : space;
@@ -327,7 +375,7 @@ void board_audio_play(const int16_t *pcm, int n) {
     memcpy(s_ring, pcm + first, (size_t)(take - first) * sizeof(int16_t));
     s_ring_head = (s_ring_head + take) % SPK_RING_SAMPLES;
     s_ring_count += take;
-    s_spk_dropped += (uint32_t)(n - take);
+    s_spk_overflow += (uint32_t)(n - take);
     portEXIT_CRITICAL(&s_ring_mux);
     xSemaphoreGive(s_spk_wake);
 }
@@ -419,8 +467,6 @@ esp_err_t board_audio_init(void) {
      * task stops writing, the DMA sends zeros instead of looping stale audio. */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
-    err = i2s_new_channel(&chan_cfg, &s_tx_chan, &s_rx_chan);
-    if (err != ESP_OK) return fail("i2s_new_channel", err);
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT,
@@ -433,12 +479,35 @@ esp_err_t board_audio_init(void) {
             .din = I2S_DIN_PIN,
         },
     };
-    err = i2s_channel_init_std_mode(s_tx_chan, &std_cfg);
-    if (err != ESP_OK) return fail("i2s_channel_init_std_mode(tx)", err);
-    err = i2s_channel_init_std_mode(s_rx_chan, &std_cfg);
-    if (err != ESP_OK) return fail("i2s_channel_init_std_mode", err);
-    err = i2s_channel_enable(s_tx_chan);
-    if (err != ESP_OK) return fail("i2s_channel_enable(tx)", err);
+    /* In full duplex the RX side is slaved to TX's clocks, so a TX problem
+     * would take the mic down with it. Any duplex step failing -> tear it
+     * down and fall back to the mic-only (RX simplex) setup; the speaker
+     * stays dead. NEVER disable TX, or close/reopen s_spk_dev, at runtime:
+     * the mic would stall with it. */
+    bool duplex = true;
+    err = i2s_new_channel(&chan_cfg, &s_tx_chan, &s_rx_chan);
+    if (err == ESP_OK) err = i2s_channel_init_std_mode(s_tx_chan, &std_cfg);
+    if (err == ESP_OK) err = i2s_channel_init_std_mode(s_rx_chan, &std_cfg);
+    if (err == ESP_OK) err = i2s_channel_enable(s_tx_chan);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "board_audio: full duplex failed (%s) — mic only, speaker off",
+                 esp_err_to_name(err));
+        if (s_tx_chan) {
+            i2s_channel_disable(s_tx_chan);   /* may not be enabled: ignore */
+            i2s_del_channel(s_tx_chan);
+            s_tx_chan = NULL;
+        }
+        if (s_rx_chan) {
+            i2s_del_channel(s_rx_chan);
+            s_rx_chan = NULL;
+        }
+        duplex = false;
+        std_cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
+        err = i2s_new_channel(&chan_cfg, NULL, &s_rx_chan);
+        if (err != ESP_OK) return fail("i2s_new_channel", err);
+        err = i2s_channel_init_std_mode(s_rx_chan, &std_cfg);
+        if (err != ESP_OK) return fail("i2s_channel_init_std_mode", err);
+    }
     err = i2s_channel_enable(s_rx_chan);
     if (err != ESP_OK) return fail("i2s_channel_enable", err);
 
@@ -497,7 +566,10 @@ esp_err_t board_audio_init(void) {
     ESP_LOGI(TAG, "board_audio: ES7210 up (16 kHz, 4 mics, gain 40 dB, PA off)");
 
     /* Speaker after the mic is up: its failure never touches the mic */
-    speaker_init(data_if);
+    if (duplex)
+        speaker_init(data_if);
+    else
+        speaker_fail("full duplex");
     return ESP_OK;
 }
 
