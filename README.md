@@ -75,7 +75,7 @@ Build environment variables:
   once a second for 30 s after boot, to check a board's mic. Never in a
   deployed image.
 
-Both debug options are opt-in by value (`=1`), and the lenoxvi deploy script
+Both debug options are opt-in by value (`=1`), and the LenoxVI deploy script
 refuses to publish an image built with either.
 
 ## Flashing
@@ -86,11 +86,11 @@ refuses to publish an image built with either.
   dashboard; every later image can be credential-free.
 - **Updates:** over the air through the LenoxVI bot — the dashboard's Firmware
   panel, or `scripts/deploy_firmware.sh --track array|flex|waveshare` in the
-  lenoxvi repo.
+  LenoxVI repo.
   A new image boots pending verification and rolls back automatically unless
   it reaches the bot within 5 minutes.
 - On array/flex, the XVF3800 audio chip runs its own XMOS firmware, flashed
-  separately (see the lenoxvi repo's bring-up docs).
+  separately (see the LenoxVI repo's bring-up docs).
 
 ## Versions
 

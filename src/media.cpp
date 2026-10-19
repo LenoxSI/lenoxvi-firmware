@@ -1,4 +1,4 @@
-/* media.cpp — reSpeaker XVF3800 + XIAO ESP32S3 (lenoxvi Node B, bedroom)
+/* media.cpp — reSpeaker XVF3800 + XIAO ESP32S3 (LenoxVI Node B, bedroom)
  *
  * Port of the Waveshare media.cpp (v1 firmware, b4d1d28) for the reSpeaker:
  *   - I2C: SDA=5 SCL=6 (XIAO D4/D5), XVF3800 control @ 0x2C (probe only —

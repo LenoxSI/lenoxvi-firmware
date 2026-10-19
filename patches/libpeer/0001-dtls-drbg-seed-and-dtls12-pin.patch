@@ -1,4 +1,4 @@
-# lenoxvi libpeer patch 0001 (2026-09-15 / 2026-09-19): mbedtls 3.x DRBG seed at
+# LenoxVI libpeer patch 0001 (2026-09-15 / 2026-09-19): mbedtls 3.x DRBG seed at
 # init (else DTLS init dies, -0x0020) + pin DTLS to 1.2 both roles (else the
 # SCTP association/DCEP never completes once TLS 1.3 is enabled for OTA).
 # Was an UNTRACKED edit in deps/libpeer until 2026-10-14.

@@ -1,4 +1,4 @@
-# lenoxvi libpeer patch 0003 (2026-10-14/15): SCTP INIT retransmit (RFC 4960
+# LenoxVI libpeer patch 0003 (2026-10-14/15): SCTP INIT retransmit (RFC 4960
 # T1-init) — the lone upstream INIT is dropped by aiortc on ~55% of sessions
 # (passive SCTP side + drops app data before its SCTP receiver registers).
 # 2026-10-15: + zero the checksum field before computing the INIT CRC —
@@ -11,7 +11,7 @@ diff --git a/src/peer_connection.c b/src/peer_connection.c
        }
        break;
      case PEER_CONNECTION_CONNECTED:
-+      /* lenoxvi 0003: resend SCTP INIT until the association forms */
++      /* LenoxVI 0003: resend SCTP INIT until the association forms */
 +      if (pc->config.datachannel) {
 +        sctp_tick(&pc->sctp);
 +      }
@@ -34,7 +34,7 @@ diff --git a/src/sctp.c b/src/sctp.c
  }
  
 +#if !CONFIG_USE_USRSCTP
-+/* lenoxvi 0003: the upstream INIT build, byte-identical, callable again.
++/* LenoxVI 0003: the upstream INIT build, byte-identical, callable again.
 + * Caller holds sctp_lock (create_association / sctp_tick). */
 +static void sctp_send_init(Sctp* sctp) {
 +  int length = 0;
@@ -57,7 +57,7 @@ diff --git a/src/sctp.c b/src/sctp.c
 +  init_chunk->initial_tsn = htonl(sctp->tsn);
 +  length = ntohs(init_chunk->common.length) + sizeof(SctpHeader);
 +  length = (4 * ((length + 3) / 4));
-+  /* lenoxvi 0003 (2026-10-15): CRC32c is computed over the packet WITH the
++  /* LenoxVI 0003 (2026-10-15): CRC32c is computed over the packet WITH the
 +   * checksum field zeroed (RFC 4960 §6.8; every other builder here zeroes
 +   * it first). Upstream's INIT never did — harmless while the INIT was
 +   * built once in a freshly zeroed buffer, but every RETRANSMIT carried the
@@ -99,7 +99,7 @@ diff --git a/src/sctp.c b/src/sctp.c
 -  length = (4 * ((length + 3) / 4));
 -  header->checksum = sctp_get_checksum(sctp, sctp->buf, length);
 -  dtls_srtp_write(sctp->dtls_srtp, sctp->buf, length);
-+  // send SCTP_INIT (lenoxvi 0003: factored out so sctp_tick can resend it)
++  // send SCTP_INIT (LenoxVI 0003: factored out so sctp_tick can resend it)
 +  sctp_send_init(sctp);
 +  sctp->init_tries = 1;
 +  sctp->init_sent_ms = ports_get_epoch_time();
@@ -141,7 +141,7 @@ diff --git a/src/sctp.h b/src/sctp.h
    void (*onclose)(void* userdata);
  
    void* userdata;
-+  /* lenoxvi 0003: SCTP INIT retransmit (RFC 4960 T1-init) state */
++  /* LenoxVI 0003: SCTP INIT retransmit (RFC 4960 T1-init) state */
 +  uint32_t init_sent_ms;
 +  int init_tries;
    uint8_t buf[CONFIG_MTU];
@@ -151,7 +151,7 @@ diff --git a/src/sctp.h b/src/sctp.h
  void sctp_lock(void);
  void sctp_unlock(void);
  
-+/* lenoxvi 0003 (2026-10-14): resend SCTP INIT until the association forms.
++/* LenoxVI 0003 (2026-10-14): resend SCTP INIT until the association forms.
 + * Upstream raw SCTP sent exactly ONE INIT the instant DTLS completed, with
 + * no T1-init timer. Against aiortc (which is the PASSIVE SCTP side when we
 + * are ICE-controlling, and silently drops app data that lands before its

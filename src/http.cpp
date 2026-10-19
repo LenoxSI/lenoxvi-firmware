@@ -100,7 +100,7 @@ void pipecat_http_request(char *offer, char *answer) {
     ESP_LOGE(LOG_TAG, "Unable to create JSON offer");
     return;
   }
-  /* Room name = the zone routing key (lenoxvi v2 contract). 1.1.0:
+  /* Room name = the zone routing key (LenoxVI v2 contract). 1.1.0:
    * the value is NVS-backed (dashboard-renamable) — the bake is the
    * fallback only (settings.cpp). */
   if (cJSON_AddStringToObject(j_offer, "room", settings_get_node_name()) == NULL) {

@@ -1,4 +1,4 @@
-# lenoxvi libpeer patch 0002 (design note H2, 2026-10-14): one recursive lock
+# LenoxVI libpeer patch 0002 (H2, 2026-10-14): one recursive lock
 # serializing sctp->buf / tsn / stream sequences / the mbedtls SSL context
 # across the loop task (DTLS read + SCTP incoming) and app-task senders.
 diff --git a/src/peer_connection.c b/src/peer_connection.c
@@ -9,7 +9,7 @@ index 91136de..b827b5c 100644
            peer_connection_incoming_rtcp(pc, pc->agent_buf, pc->agent_ret);
  
          } else if (dtls_srtp_probe(pc->agent_buf)) {
-+          /* lenoxvi H2: the mbedtls read and the SCTP handling are one
++          /* LenoxVI H2: the mbedtls read and the SCTP handling are one
 +           * critical section — app tasks write the same SSL context and
 +           * sctp->buf from sctp_outgoing_data (see sctp_lock in sctp.h). */
 +          sctp_lock();
@@ -31,7 +31,7 @@ index 3cb722d..1e0bf52 100644
      0x79B737BAL, 0x8BDCB4B9L, 0x988C474DL, 0x6AE7C44EL,
      0xBE2DA0A5L, 0x4C4623A6L, 0x5F16D052L, 0xAD7D5351L};
  
-+/* lenoxvi H2 (2026-10-14) — see sctp.h. */
++/* LenoxVI H2 (2026-10-14) — see sctp.h. */
 +#if defined(ESP_PLATFORM)
 +#include <freertos/FreeRTOS.h>
 +#include <freertos/semphr.h>
@@ -89,7 +89,7 @@ index 3cb722d..1e0bf52 100644
    return 0;
  }
  
-+/* lenoxvi H2 wrappers: public entry points take the lock around the
++/* LenoxVI H2 wrappers: public entry points take the lock around the
 + * unchanged upstream bodies (no early-return unlock bookkeeping). */
 +int sctp_outgoing_data(Sctp* sctp, char* buf, size_t len, SctpDataPpid ppid, uint16_t sid) {
 +  sctp_lock();
@@ -122,7 +122,7 @@ index aa6c958..2bc0a72 100644
  
  int sctp_is_connected(Sctp* sctp);
  
-+/* lenoxvi H2 (2026-10-14): ONE recursive lock serializing every touch of
++/* LenoxVI H2 (2026-10-14): ONE recursive lock serializing every touch of
 + * the shared SCTP/DTLS state — sctp->buf (outgoing build AND incoming
 + * SACK/response build share it; incoming memsets it), sctp->tsn, the
 + * outgoing stream sequences, and the mbedtls SSL context (read in the
