@@ -115,6 +115,39 @@ static void check_dc_watchdog(void) {
   }
 }
 
+/* The session is over: re-roll (reboot -> fresh offer). One path for
+ * every way a session ends, tagged for get_info boot.why. */
+static void pipecat_session_over(const char *why) {
+  rgb_set_state(RGB_STATE_ERROR);
+  /* OTA flash in flight (2026-10-05): the churn loop — five reboots
+   * to land one 1.2MB flash — was THIS esp_restart() firing mid-
+   * download (the pull starves the audio task, the peer drops, the
+   * handler reboots before esp_ota_write finishes). The OTA task
+   * owns the only reboot during a flash; a dropped session during
+   * a flash is EXPECTED — it re-offers when the OTA task reboots
+   * the node with the new image. */
+  if (pipecat_ota_busy()) {
+    ESP_LOGW(LOG_TAG, "session over (%s) mid-OTA — not rebooting, flash in flight", why);
+    pipecat_ota_defer_drop();  /* a FAILED flash reboots instead (ota.cpp) */
+    return;
+  }
+#ifndef LINUX_BUILD
+  vTaskDelay(pdMS_TO_TICKS(3000));
+  boot_diag_restart(why);
+#endif
+}
+
+/* The bot closed the session: it aborted the data channel's SCTP
+ * association (an SCTP ABORT — the only close this libpeer build reports
+ * without usrsctp) — what the bot sends on a clean stop or restart.
+ * Without this the node only noticed through the STUN keepalive timeout
+ * (45-75 s); now it re-offers right away and is back as soon as the bot
+ * is. */
+static void pipecat_ondatachannel_onclose_task(void *userdata) {
+  ESP_LOGW(LOG_TAG, "bot closed the session (data channel closed)");
+  pipecat_session_over("bot-closed");
+}
+
 static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
                                                  void *user_data) {
   ESP_LOGI(LOG_TAG, "PeerConnectionState: %s",
@@ -125,23 +158,7 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
   if (state == PEER_CONNECTION_DISCONNECTED ||
       state == PEER_CONNECTION_FAILED ||
       state == PEER_CONNECTION_CLOSED) {
-    rgb_set_state(RGB_STATE_ERROR);
-    /* OTA flash in flight (2026-10-05): the churn loop — five reboots
-     * to land one 1.2MB flash — was THIS esp_restart() firing mid-
-     * download (the pull starves the audio task, the peer drops, the
-     * handler reboots before esp_ota_write finishes). The OTA task
-     * owns the only reboot during a flash; a dropped session during
-     * a flash is EXPECTED — it re-offers when the OTA task reboots
-     * the node with the new image. */
-    if (pipecat_ota_busy()) {
-      ESP_LOGW(LOG_TAG, "session dropped mid-OTA — not rebooting, flash in flight");
-      pipecat_ota_defer_drop();  /* a FAILED flash reboots instead (ota.cpp) */
-      return;
-    }
-#ifndef LINUX_BUILD
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    boot_diag_restart("peer-dropped");
-#endif
+    pipecat_session_over("peer-dropped");
   } else if (state == PEER_CONNECTION_CONNECTED) {
    rgb_set_state(RGB_STATE_BRIDGE_CONNECTED);
    connected_at = xTaskGetTickCount();  // arm the DC watchdog
@@ -242,7 +259,8 @@ void pipecat_init_webrtc() {
   peer_connection_onicecandidate(peer_connection, pipecat_on_icecandidate_task);
   peer_connection_ondatachannel(peer_connection,
                                 pipecat_ondatachannel_onmessage_task,
-                                pipecat_ondatachannel_onopen_task, NULL);
+                                pipecat_ondatachannel_onopen_task,
+                                pipecat_ondatachannel_onclose_task);
 
   offer_created_at = xTaskGetTickCount();  /* arm the connect watchdog */
   if (offer_created_at == 0) offer_created_at = 1;  /* 0 = "not armed" */
