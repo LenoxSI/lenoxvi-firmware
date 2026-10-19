@@ -46,7 +46,7 @@ static void pipecat_ondatachannel_onmessage_task(char *msg, size_t len,
 static bool dc_opened = false;
 static TickType_t connected_at = 0;
 
-/* CONNECT watchdog (design note H3, 2026-10-14): the DC watchdog above only
+/* CONNECT watchdog (H3, 2026-10-14): the DC watchdog above only
  * arms AT CONNECTED — a session that never gets there (offer lost, ICE
  * stuck in CHECKING, or NEW forever) had NO timer and the node sat dark
  * until a power-cycle. Armed when the offer is created; a healthy connect
@@ -181,7 +181,7 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
                                   30000, NULL, 7, stack_memory, &task_buffer,
                                   0);
     pipecat_init_rtvi(peer_connection, &pipecat_rtvi_callbacks);
-    cmd_liveness_start();  /* 5-min ping liveness (design note zombie fix) */
+    cmd_liveness_start();  /* 5-min ping liveness (zombie fix) */
     // OTA check at CONNECTED (empirical bisect 2026-09-19): the identical
     // version GET crashed deterministically at got-ip (StoreProhibited,
     // ROM memcpy, TLS setup) but worked perfectly here in build 47 — heap

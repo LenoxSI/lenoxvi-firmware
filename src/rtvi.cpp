@@ -190,7 +190,7 @@ void pipecat_rtvi_send_raw(const char *json) {
 
 void pipecat_rtvi_note_bot_traffic(void) {
   /* Called for legacy RTVI messages too — anything from the bot
-   * proves the session is alive (liveness probe, design note). */
+   * proves the session is alive (liveness probe). */
   cmd_note_activity();
 }
 

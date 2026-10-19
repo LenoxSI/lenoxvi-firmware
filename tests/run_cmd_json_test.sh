@@ -44,11 +44,11 @@ d = J("simple_null_args")
 check("simple: NULL cmd/note -> empty strings", d["cmd"] == "" and d["data"] == "", d)
 d = J("simple_bad_utf8")
 check("simple: invalid UTF-8 -> '?', valid kept", d["cmd"] == "café-??-ok", d)
-check("name: plain", J("name_plain") == {**ENV, "cmd": "set_name", "ok": True, "data": {"name": "room-b"}})
+check("name: plain", J("name_plain") == {**ENV, "cmd": "set_name", "ok": True, "data": {"name": "room-a"}})
 check("name: quote escaped", J("name_quote")["data"]["name"] == 'a"b')
 d = J("info_plain")
 check("info: all fields", d["cmd"] == "get_info" and d["data"] == {
-    "name": "room-b", "mac": "020000aabb01", "fw": "1.2.20", "line": "array",
+    "name": "room-a", "mac": "020000aabb01", "fw": "1.2.20", "line": "array",
     "muted": True, "mute_hw": {"btn": 1}}, d)
 d = J("info_hostile")
 check("info: hostile name can't override muted", d["data"]["muted"] is False

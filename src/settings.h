@@ -9,8 +9,8 @@ extern "C" {
 #endif
 
 /* Node settings stored in NVS — runtime-writable (dashboard command
- * channel), compile-time values become fallbacks only (design note:
- * the v1.5-portal autopsy keeps the NVS layer; firmware 1.1.0). */
+ * channel), compile-time values become fallbacks only
+ * (the v1.5-portal autopsy kept the NVS layer; firmware 1.1.0). */
 
 #define NODE_NAME_MAX 32
 #define WIFI_SSID_MAX 33

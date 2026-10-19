@@ -465,7 +465,7 @@ void pipecat_check_ota_update(void) {
     boot_diag_restart("ota-success");
 }
 
-/* ── OTA health gate + rollback (design note H1, 2026-10-13) ────────
+/* ── OTA health gate + rollback (H1, 2026-10-13) ────────
  *
  * With CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE the BOOTLOADER boots a fresh
  * OTA image in ESP_OTA_IMG_PENDING_VERIFY. If that image reboots (crash,

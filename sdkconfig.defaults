@@ -42,7 +42,7 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 
-# Watchdogs ON (M5, 1.2.25 — design note). They were disabled here since the
+# Watchdogs ON (M5, 1.2.25). They were disabled here since the
 # upstream example; a node that hangs a core now reboots instead of sitting
 # dead until someone power-cycles it. Panic = print + reboot (default), and
 # the OTA rollback gate still catches a new image that loops.
@@ -66,7 +66,7 @@ CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y
 
 CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
 
-# OTA rollback (design note H1, 2026-10-13): the BOOTLOADER boots a fresh
+# OTA rollback (H1, 2026-10-13): the BOOTLOADER boots a fresh
 # OTA image in PENDING_VERIFY; the app marks it valid only after the health
 # gate (ota.cpp — first bot round-trip over the data channel). Any reboot
 # before that rolls back to the previous image. This is a BOOTLOADER

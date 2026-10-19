@@ -6,7 +6,7 @@
  *
  * Existing RTVI "type" messages are untouched; anything with a "cmd"
  * field routes here (rtvi.cpp tries cmd first). One channel, versioned
- * by the schema doc — design note protocol note: scan, set_wifi,
+ * by the protocol schema: scan, set_wifi,
  * set_name, restart, get_info, ping.
  */
 

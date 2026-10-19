@@ -655,7 +655,7 @@ void pipecat_init_audio_capture() {
                                * vs the old slave image; OWW scores 0.00 on it. Gain-only profile
                                * (MIC_GAIN 60 + AGC, Seeed v1.0.8 cmd IDs, readback-verified) —
                                * no routing/AEC writes this time. Old OFF verdict applied to the
-                               * WRONG cmd map + slave image (see design note). */
+                               * WRONG cmd map + slave image. */
 #endif
 #if XVF_APPLY_PROFILE
     configure_xvf3800_dsp_profile();

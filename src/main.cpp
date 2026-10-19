@@ -37,7 +37,7 @@ extern "C" void app_main(void) {
    * (Audio/I2S init stays deferred to post-DTLS — heap ordering.) */
   pipecat_init_i2c_early();
   peer_init();
-  // OTA health gate (design note H1, 2026-10-13). This used to be a
+  // OTA health gate (H1, 2026-10-13). This used to be a
   // boot-time mark-valid — which made rollback meaningless: every image
   // validated itself before it ever proved it could reach the bot. Now
   // this call is READ-ONLY (state query + spawn the gate task); the image

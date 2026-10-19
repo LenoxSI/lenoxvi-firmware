@@ -11,7 +11,7 @@ IDF 5.3 ships mbedtls 3.6. On that path, `dtls_srtp_init()` calls
 but upstream main only seeds the DRBG later, inside cert creation
 (`create_cert()`, line ~790). An unseeded DRBG makes cookie_setup fail with
 `-0x0020` = `MBEDTLS_ERR_AES_INVALID_KEY_LENGTH` — NOT an OOM, which cost
-an evening to diagnose (2026-09-15, reSpeaker node bring-up, design note).
+an evening to diagnose (2026-09-15, reSpeaker node bring-up).
 
 Symptom if missing: `mbedtls_ssl_cookie_setup returned -0x0020` in the boot
 log, WebRTC never connects.
