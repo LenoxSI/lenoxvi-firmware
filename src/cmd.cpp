@@ -159,18 +159,21 @@ void cmd_push_firmware_version(void) {
    * "rejected" rides alongside "fw" (the bot ignores unknown keys today;
    * it's there so a silent rollback can be surfaced). Version strings come
    * from esp_app_desc (digits + dots), never user input. */
+  /* "wifi_rollback" (1.2.35): this boot restored the previous network
+   * after a failed Wi-Fi change (settings_wifi_rolled_back). Sent only when
+   * true; an older bot ignores it. */
   char rejected[32];
+  char extra[96] = "";
   if (pipecat_ota_rejected_version(rejected, sizeof(rejected))) {
-    snprintf(reply, sizeof(reply),
-             "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
-             "\"ok\":true,\"data\":{\"fw\":\"%s\",\"line\":\"%s\",\"rejected\":\"%s\",\"muted\":%s}}",
-             app_desc->version, XVF_OTA_TRACK, rejected, pipecat_mic_muted() ? "true" : "false");
-  } else {
-    snprintf(reply, sizeof(reply),
-             "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
-             "\"ok\":true,\"data\":{\"fw\":\"%s\",\"line\":\"%s\",\"muted\":%s}}",
-             app_desc->version, XVF_OTA_TRACK, pipecat_mic_muted() ? "true" : "false");
+    snprintf(extra, sizeof(extra), ",\"rejected\":\"%s\"", rejected);
   }
+  if (settings_wifi_rolled_back()) {
+    strlcat(extra, ",\"wifi_rollback\":true", sizeof(extra));
+  }
+  snprintf(reply, sizeof(reply),
+           "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"fw_push\","
+           "\"ok\":true,\"data\":{\"fw\":\"%s\",\"line\":\"%s\"%s,\"muted\":%s}}",
+           app_desc->version, XVF_OTA_TRACK, extra, pipecat_mic_muted() ? "true" : "false");
   pipecat_rtvi_send_raw(reply);
   ESP_LOGI(TAG, "fw_push: sent running version %s", app_desc->version);
 }

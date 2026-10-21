@@ -40,6 +40,8 @@ int settings_set_wifi(const char *ssid, const char *password);
 int settings_begin_wifi_trial(const char *ssid, const char *password);
 int settings_wifi_trial_boot(void);
 bool settings_wifi_trial_pending(void);
+/* True when this boot rolled back to the previous network (1.2.35). */
+bool settings_wifi_rolled_back(void);
 int settings_wifi_trial_passed(void);
 
 /* Mic mute (H4, 2026-10-16): persisted so a muted node stays muted across

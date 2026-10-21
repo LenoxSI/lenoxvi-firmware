@@ -183,6 +183,10 @@ const char *settings_get_wifi_pass(void) { return g_wifi_pass; }
 const char *settings_hostname(void) { return g_node_name; }
 /* ── Wi-Fi change trial (M1, 1.2.23) ────────────────────────────────── */
 static bool g_wifi_trial_pending = false;
+/* This boot restored the previous network after a failed trial (1.2.35):
+ * fw_push tells the bot, so the dashboard can say so. RAM only, so it is
+ * reported for this boot's sessions and gone after the next reboot. */
+static bool g_wifi_rolled_back = false;
 
 int settings_begin_wifi_trial(const char *ssid, const char *password) {
   if (stack_in_psram("begin_wifi_trial")) return -ESP_ERR_INVALID_STATE;
@@ -243,6 +247,7 @@ int settings_wifi_trial_boot(void) {
       if (err == ESP_OK) {
         strlcpy(g_wifi_ssid, prev_ssid, sizeof(g_wifi_ssid));
         strlcpy(g_wifi_pass, prev_pass, sizeof(g_wifi_pass));
+        g_wifi_rolled_back = true;
       }
       ESP_LOGE(TAG, "wifi trial FAILED %u boots — rolled back to the previous network (rc=%d)",
                (unsigned)WIFI_TRIAL_MAX_BOOTS, err);
@@ -258,6 +263,7 @@ int settings_wifi_trial_boot(void) {
 }
 
 bool settings_wifi_trial_pending(void) { return g_wifi_trial_pending; }
+bool settings_wifi_rolled_back(void) { return g_wifi_rolled_back; }
 
 int settings_wifi_trial_passed(void) {
   if (stack_in_psram("wifi_trial_passed")) return -ESP_ERR_INVALID_STATE;
