@@ -135,8 +135,13 @@ static i2c_master_dev_handle_t xvf3800 = NULL;
 
 #define XVF_READ_BIT          0x80
 #define XVF_CTRL_DONE         0x00
+/* Servicer status byte. Seeed's frame format documents 0 = OK, 64 (0x40) =
+ * retry. 0x01 is what this firmware has always re-asked on (the button poll
+ * was tuned against it), so it stays a busy status too: both mean "ask again",
+ * and every retry loop is bounded. */
 #define XVF_CTRL_WAIT         0x01
-#define XVF_SERVICER_RETRY    0xFE
+#define XVF_SERVICER_RETRY    0x40
+#define XVF_STATUS_BUSY(s)    ((s) == XVF_CTRL_WAIT || (s) == XVF_SERVICER_RETRY)
 #define XVF_CONTROL_TIMEOUT_MS 100  /* Kyzcreig's value; 50 was too tight */
 #define XVF_CONTROL_RETRIES   50
 
@@ -323,7 +328,7 @@ static int xvf_button_read_once(void) {
         if (i2c_master_transmit_receive(xvf3800, req, sizeof(req), resp, sizeof(resp),
                                         pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS)) != ESP_OK) return -1;   /* bus error */
         if (resp[0] == XVF_CTRL_DONE) return (resp[1] >> XVF_GPI_BUTTON_BIT) & 1;
-        if (resp[0] != XVF_CTRL_WAIT) return -100 - resp[0];   /* other status (diag) */
+        if (!XVF_STATUS_BUSY(resp[0])) return -100 - resp[0];   /* other status (diag) */
     }
     return -2;                    /* still WAIT after 5 asks */
 }
@@ -420,7 +425,7 @@ static void mute_task_start(void) {
 }
 
 /* Read path per Seeed wiki frame format: write [resid][cmd|0x80][read_len+1],
- * then read [status][data...]. Status 0 = OK, 0x40 (64) = retry. */
+ * then read [status][data...]. Status 0 = OK; busy (XVF_STATUS_BUSY) = retry. */
 static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd,
                                 uint8_t *out, size_t out_len) {
     if (xvf3800 == NULL) return ESP_ERR_INVALID_STATE;
@@ -431,7 +436,7 @@ static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd,
             xvf3800, req, sizeof(req), resp, out_len + 1,
             pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS));
         if (ret != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
-        if (resp[0] == XVF_CTRL_WAIT) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }  /* servicer busy */
+        if (XVF_STATUS_BUSY(resp[0])) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }  /* servicer busy */
         if (resp[0] != XVF_CTRL_DONE) return ESP_ERR_INVALID_RESPONSE;
         memcpy(out, &resp[1], out_len);
         return ESP_OK;
