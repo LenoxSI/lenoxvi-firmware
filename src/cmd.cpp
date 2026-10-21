@@ -27,6 +27,7 @@
 
 #include "main.h"
 #include "settings.h"
+#include "wifi_trial.h"
 #include "cmd_json.h"
 
 static const char *TAG = "cmd";
@@ -286,6 +287,8 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     const cJSON *j_pass = cJSON_GetObjectItem(msg, "pass");
     if (!cJSON_IsString(j_ssid) || !cJSON_IsString(j_pass) || !j_ssid->valuestring[0]) {
       cmd_send_simple("set_wifi", false, "missing ssid/pass");
+    } else if (!wifi_pass_acceptable(j_pass->valuestring)) {
+      cmd_send_simple("set_wifi", false, "password must be up to 63 characters, or 64 hex digits");
     } else if (nvs_run(1, j_ssid->valuestring, j_pass->valuestring) != 0) {
       cmd_send_simple("set_wifi", false, "nvs error");
     } else {

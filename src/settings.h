@@ -14,7 +14,7 @@ extern "C" {
 
 #define NODE_NAME_MAX 32
 #define WIFI_SSID_MAX 33
-#define WIFI_PASS_MAX 64
+#define WIFI_PASS_MAX 65  /* 64-char raw PSK + NUL (1.2.35; 64 held only 63) */
 
 /* Load the node's settings at boot. Safe before nvs_flash_init() —
  * app_main initializes NVS first, then calls this. Returns true when a

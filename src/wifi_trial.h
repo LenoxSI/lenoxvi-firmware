@@ -32,6 +32,12 @@ typedef enum {
 wifi_trial_action_t wifi_trial_boot_decision(uint8_t stored_trial, bool have_previous,
                                              uint8_t *next_trial);
 
+/* Wi-Fi password shape (1.2.35). Up to 63 characters is a WPA passphrase;
+ * exactly 64 is a raw PSK and must be hex (the Wi-Fi driver reads 64 chars
+ * as hex); anything longer is refused, never silently cut short. NULL or
+ * empty is accepted: set_wifi keeps the current password then. */
+bool wifi_pass_acceptable(const char *pass);
+
 #ifdef __cplusplus
 }
 #endif

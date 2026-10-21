@@ -1,6 +1,9 @@
 /* Wi-Fi change trial — boot decision (see wifi_trial.h). */
 #include "wifi_trial.h"
 
+#include <ctype.h>
+#include <string.h>
+
 wifi_trial_action_t wifi_trial_boot_decision(uint8_t stored_trial, bool have_previous,
                                              uint8_t *next_trial) {
   if (stored_trial == 0) {
@@ -13,4 +16,15 @@ wifi_trial_action_t wifi_trial_boot_decision(uint8_t stored_trial, bool have_pre
   }
   *next_trial = 0;                               /* exhausted (or a corrupt huge value) */
   return have_previous ? WIFI_TRIAL_ROLLBACK : WIFI_TRIAL_GIVE_UP;
+}
+
+bool wifi_pass_acceptable(const char *pass) {
+  if (!pass) return true;
+  size_t n = strlen(pass);
+  if (n <= 63) return true;
+  if (n > 64) return false;
+  for (size_t i = 0; i < n; i++) {
+    if (!isxdigit((unsigned char)pass[i])) return false;
+  }
+  return true;
 }

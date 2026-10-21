@@ -187,6 +187,7 @@ static bool g_wifi_trial_pending = false;
 int settings_begin_wifi_trial(const char *ssid, const char *password) {
   if (stack_in_psram("begin_wifi_trial")) return -ESP_ERR_INVALID_STATE;
   if (!ssid || !ssid[0]) return -1;
+  if (!wifi_pass_acceptable(password)) return -1;   /* 65+ chars, or 64 non-hex */
   /* Same rule as before: an empty password keeps the current one. */
   const char *new_pass = (password && password[0]) ? password : g_wifi_pass;
   nvs_handle_t h;

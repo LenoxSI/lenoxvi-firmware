@@ -76,6 +76,18 @@ int main(void) {
   begin(&d, "NewNet");
   CHECK("re-change mid-trial restarts the count at 1", d.trial == 1);
 
+  /* password shape (1.2.35): <=63 = passphrase, 64 = raw PSK (hex only) */
+  CHECK("pass: 63-char passphrase accepted",
+        wifi_pass_acceptable("123456789012345678901234567890123456789012345678901234567890123"));
+  CHECK("pass: 64-char hex PSK accepted",
+        wifi_pass_acceptable("0123456789abcdefABCDEF0123456789abcdef0123456789abcdef0123456789"));
+  CHECK("pass: 64 chars with a non-hex char refused",
+        !wifi_pass_acceptable("0123456789abcdefABCDEF0123456789abcdef0123456789abcdef012345678g"));
+  CHECK("pass: 65 chars refused (never silently truncated)",
+        !wifi_pass_acceptable("0123456789abcdefABCDEF0123456789abcdef0123456789abcdef01234567890"));
+  CHECK("pass: empty accepted (keeps the current password)", wifi_pass_acceptable(""));
+  CHECK("pass: NULL accepted (keeps the current password)", wifi_pass_acceptable(NULL));
+
   printf("\n%s\n", fails ? "FAILED" : "ALL PASSED");
   return fails ? 1 : 0;
 }
