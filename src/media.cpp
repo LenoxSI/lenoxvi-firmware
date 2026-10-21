@@ -1,20 +1,20 @@
-/* media.cpp — reSpeaker XVF3800 + XIAO ESP32S3 (LenoxVI Node B, bedroom)
+/* media.cpp — mic capture + reply decode for every board line.
  *
- * Port of the Waveshare media.cpp (v1 firmware, b4d1d28) for the reSpeaker:
- *   - I2C: SDA=5 SCL=6 (XIAO D4/D5), XVF3800 control @ 0x2C (probe only —
- *     the flashed I2S-slave firmware v1.0.8 needs no register setup)
- *   - I2S: ESP32 MASTER, STEREO, 32-bit, 16 kHz — XVF3800 is the I2S slave
- *     providing processed beamformed audio on DIN (GPIO43)
- *   - No codec driver: the XVF3800 IS the "codec" — raw i2s_channel_read
- *     replaces esp_codec_dev+ES7210
- *   - No local speaker path: replies come out of the room's Sonos; incoming
- *     Opus is decoded ONLY to drive is_playing (node-side turn lock: the mic
- *     is zeroed while the bot speaks — same protection v1 had)
- *   - Pins from Seeed's Xiaozhi reSpeaker porting config (verified 2026-09-15)
+ * array / flex (XIAO ESP32-S3 on a reSpeaker XVF3800 board):
+ *   - I2C: SDA=5 SCL=6 (XIAO D4/D5), XVF3800 control @ 0x2C — boot DSP
+ *     profile, LED bridge, and (array) the physical mute button poll
+ *   - I2S: the XVF3800 is clock MASTER on a 48 kHz native bus, the ESP32 is
+ *     the slave reading processed audio on DIN (GPIO43); every 6 words are
+ *     averaged down to one 16 kHz mono sample (see XVF_NATIVE_RATE)
+ *   - No codec driver: the XVF3800 IS the "codec"
+ *   - Replies play on the room's speaker zone; incoming Opus is decoded to
+ *     drive is_playing (node-side turn lock: the mic is zeroed while the bot
+ *     speaks)
+ * waveshare (ESP32-S3-AUDIO): the board component owns I2C/I2S and hands
+ *   over 16 kHz mono (board_audio_read); decoded replies can also play on
+ *   the built-in speaker (LENOXVI_SPEAKER_PLAY).
  *
- * Pipecat frame math unchanged: 320 mono int16 = 20ms @ 16kHz; hardware
- * capture is stereo 32-bit, so 320 frames = 2560 bytes, downconvert takes
- * the left channel's high 16 bits.
+ * Pipecat frame math: 320 mono int16 = 20 ms @ 16 kHz.
  */
 
 #include <opus.h>

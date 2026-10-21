@@ -1,13 +1,14 @@
-/* cmd.cpp — bot→node command schema over the data channel (firmware 1.1.0).
+/* cmd.cpp — bot<->node command schema over the data channel (firmware 1.1.0+).
  *
  * Envelope: {"cmd": "<name>", "id": <n>, ...args}
  * Replies:  {"evt": "cmd_result", "cmd": "<name>", "id": <n>, "ok": bool,
  *            "data": {...}}
  *
  * Existing RTVI "type" messages are untouched; anything with a "cmd"
- * field routes here (rtvi.cpp tries cmd first). One channel, versioned
- * by the protocol schema: scan, set_wifi,
- * set_name, restart, get_info, ping.
+ * field routes here (rtvi.cpp tries cmd first). Bot -> node: ping, pong,
+ * restart, get_info, set_mute, set_name, scan, set_wifi, and set_speaker
+ * (waveshare). Node -> bot, unprompted in the same envelope: fw_push (on
+ * channel open), mute_push (array button), probe (liveness).
  */
 
 #include "cmd.h"
