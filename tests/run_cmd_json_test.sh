@@ -86,6 +86,12 @@ check("info boot: hostile reason/why are DATA (no injected keys), cut to buffer"
 d = J("info_boot_nullstr")["data"]
 check("info boot: NULL strings become empty, never a crash",
       d["boot"]["reason"] == "" and d["boot"]["why"] == "", d.get("boot"))
+d = J("info_boot_ka")["data"]
+check("info ka: keepalive counters in the wifi block, uint32 exact",
+      d.get("wifi") == {"rssi": -39, "ka": {"sent": 4294967295, "resent": 12, "rescued": 3}}, d.get("wifi"))
+check("info ka: boot block unchanged beside it",
+      d.get("boot") == {"reason": "sw", "why": "ota-success", "prev_up_s": 106, "up_s": 34}, d.get("boot"))
+check("info ka: absent when not given (older callers)", "ka" not in J("info_boot_panic")["data"]["wifi"], J("info_boot_panic")["data"])
 d = J("scan_mixed")["data"]
 check("scan: forging SSID is one key, no injected key",
       'a","injected":1,"b' in d and "injected" not in d and d['a","injected":1,"b'] == -55, d)

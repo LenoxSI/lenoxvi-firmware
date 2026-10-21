@@ -39,6 +39,15 @@ typedef struct cmd_audio_stats_t {
   uint32_t max_gap_us;   /* worst gap between frame reads, since last read */
 } cmd_audio_stats_t;
 
+/* STUN keepalive counters since boot (1.2.36, libpeer patch 0004):
+ * sent = fresh keepalive requests, resent = retransmits, rescued = replies
+ * that came only after a retransmit (sessions one lost packet used to close). */
+typedef struct cmd_ka_stats_t {
+  uint32_t sent;
+  uint32_t resent;
+  uint32_t rescued;
+} cmd_ka_stats_t;
+
 /* Reboot black box (1.2.29): why the previous boot ended, plus link
  * quality — see boot_diag.h for the meaning of each field. */
 typedef struct cmd_boot_info_t {
@@ -47,12 +56,14 @@ typedef struct cmd_boot_info_t {
   uint32_t prev_up_s;   /* uptime of the previous boot, seconds */
   uint32_t up_s;        /* uptime of this boot, seconds */
   int rssi;             /* Wi-Fi signal, dBm; 0 = not associated (-> null) */
+  const cmd_ka_stats_t *ka;  /* keepalive counters -> "wifi":{"ka"}; NULL = omitted */
 } cmd_boot_info_t;
 
 /* {...,"cmd":"get_info","ok":true,"data":{"name","mac","fw","line","muted",
  *  "mute_hw":{"btn"},"audio":{"core","frames","ovf","max_work_ms",
  *  "max_gap_ms"},"boot":{"reason","why","prev_up_s","up_s"},
- *  "wifi":{"rssi"}}} — mac is the 6 raw bytes, printed as 12 hex chars;
+ *  "wifi":{"rssi","ka":{"sent","resent","rescued"}}}} — mac is the 6 raw
+ *  bytes, printed as 12 hex chars; "ka" is omitted when boot->ka is NULL;
  *  "audio" is omitted when audio is NULL, "boot" + "wifi" when boot is. */
 char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
                     const char *line, bool muted, int btn,

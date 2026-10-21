@@ -1,0 +1,140 @@
+# LenoxVI libpeer patch 0004 (2026-10-21, firmware 1.2.36): STUN keepalive
+# retransmit. Upstream sends ONE binding request per keepalive and closes the
+# session if no reply arrives within CONFIG_STUN_KEEPALIVE_TIMEOUT — one lost
+# Wi-Fi packet = a dropped session. While a request is pending, resend the SAME
+# bytes (same transaction id) every CONFIG_STUN_KEEPALIVE_RETX ms; the timeout
+# still runs from the first send. Default RETX 0 = upstream behavior.
+# Adds agent_keepalive_stats() (sent / resent / rescued) for get_info.
+diff --git a/src/agent.c b/src/agent.c
+index d3a41a2..c92df90 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -342,6 +342,14 @@ static void agent_create_binding_request(Agent* agent, StunMessage* msg) {
+   stun_msg_finish(msg, STUN_CREDENTIAL_SHORT_TERM, agent->remote_upwd, strlen(agent->remote_upwd));
+ }
+ 
++static uint32_t s_ka_sent, s_ka_resent, s_ka_rescued;
++
++void agent_keepalive_stats(uint32_t* sent, uint32_t* resent, uint32_t* rescued) {
++  *sent = s_ka_sent;
++  *resent = s_ka_resent;
++  *rescued = s_ka_rescued;
++}
++
+ int agent_send_binding_request(Agent* agent) {
+   StunMessage msg;
+   StunHeader* header;
+@@ -358,10 +366,31 @@ int agent_send_binding_request(Agent* agent) {
+   memcpy(agent->binding_request_transaction_id, header->transaction_id,
+          sizeof(agent->binding_request_transaction_id));
+   agent->binding_request_pending = 1;
++  /* LenoxVI 0004: keep the exact bytes for retransmits */
++  agent->binding_request_size = 0;
++  if (msg.size > 0 && msg.size <= sizeof(agent->binding_request_buf)) {
++    memcpy(agent->binding_request_buf, msg.buf, msg.size);
++    agent->binding_request_size = (int)msg.size;
++  }
++  agent->binding_request_resent_time = agent->binding_request_sent_time;
++  agent->binding_request_resends = 0;
++  s_ka_sent++;
+   ret = agent_socket_send(agent, &agent->nominated_pair->remote->addr, msg.buf, msg.size);
+   return ret;
+ }
+ 
++int agent_resend_binding_request(Agent* agent) {
++  if (agent->nominated_pair == NULL || !agent->binding_request_pending ||
++      agent->binding_request_size <= 0) {
++    return -1;
++  }
++  agent->binding_request_resent_time = ports_get_epoch_time();
++  agent->binding_request_resends++;
++  s_ka_resent++;
++  return agent_socket_send(agent, &agent->nominated_pair->remote->addr,
++                           agent->binding_request_buf, agent->binding_request_size);
++}
++
+ void agent_process_stun_request(Agent* agent, StunMessage* stun_msg, Address* addr) {
+   StunMessage msg;
+   StunHeader* header;
+@@ -389,6 +418,7 @@ void agent_process_stun_response(Agent* agent, StunMessage* stun_msg) {
+                  sizeof(agent->binding_request_transaction_id)) == 0) {
+         agent->nominated_pair->state = ICE_CANDIDATE_STATE_SUCCEEDED;
+         agent->binding_request_pending = 0;
++        if (agent->binding_request_resends > 0) s_ka_rescued++;  /* LenoxVI 0004 */
+       }
+       break;
+     default:
+diff --git a/src/agent.h b/src/agent.h
+index 6ac77ba..51be03d 100644
+--- a/src/agent.h
++++ b/src/agent.h
+@@ -53,6 +53,15 @@ struct Agent {
+   uint32_t binding_request_sent_time;
+   uint8_t binding_request_transaction_id[12];
+   int binding_request_pending;
++  /* LenoxVI 0004: keepalive retransmit. The last binding request is kept
++   * byte-for-byte so a resend carries the SAME transaction id (a reply to
++   * any copy clears it). binding_request_sent_time stays the FIRST send, so
++   * the keepalive timeout is unchanged; binding_request_resent_time paces
++   * the resends. */
++  uint8_t binding_request_buf[STUN_ATTR_BUF_SIZE];
++  int binding_request_size;
++  uint32_t binding_request_resent_time;
++  int binding_request_resends;  /* resends of the pending request */
+ 
+   AgentMode mode;
+ 
+@@ -83,6 +92,15 @@ int agent_connectivity_check(Agent* agent);
+ 
+ int agent_send_binding_request(Agent* agent);
+ 
++/* LenoxVI 0004: resend the pending binding request unchanged. */
++int agent_resend_binding_request(Agent* agent);
++
++/* LenoxVI 0004: process-wide keepalive counters (since boot).
++ * sent = fresh binding requests, resent = retransmits, rescued = replies
++ * that arrived only after at least one retransmit (= sessions a single lost
++ * packet would have closed before 0004). */
++void agent_keepalive_stats(uint32_t* sent, uint32_t* resent, uint32_t* rescued);
++
+ void agent_clear_candidates(Agent* agent);
+ 
+ int agent_create(Agent* agent);
+diff --git a/src/config.h b/src/config.h
+index f5f9cda..3500829 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -61,6 +61,12 @@
+ #define CONFIG_STUN_KEEPALIVE_INTERVAL 0
+ #endif
+ 
++/* LenoxVI 0004: resend an unanswered keepalive every N ms (0 = never,
++ * upstream behavior). */
++#ifndef CONFIG_STUN_KEEPALIVE_RETX
++#define CONFIG_STUN_KEEPALIVE_RETX 0
++#endif
++
+ #ifndef CONFIG_STUN_KEEPALIVE_TIMEOUT
+ #define CONFIG_STUN_KEEPALIVE_TIMEOUT 15000
+ #endif
+diff --git a/src/peer_connection.c b/src/peer_connection.c
+index 9de9e76..f03795b 100644
+--- a/src/peer_connection.c
++++ b/src/peer_connection.c
+@@ -370,6 +370,16 @@ int peer_connection_loop(PeerConnection* pc) {
+             LOGW("STUN keepalive response timeout");
+             STATE_CHANGED(pc, PEER_CONNECTION_CLOSED);
+           }
++#if CONFIG_STUN_KEEPALIVE_RETX > 0
++          /* LenoxVI 0004: one lost packet must not close the session —
++           * resend the same request until a reply or the timeout above. */
++          else if ((uint32_t)(ports_get_epoch_time() - pc->agent.binding_request_resent_time) >=
++                   CONFIG_STUN_KEEPALIVE_RETX) {
++            if (agent_resend_binding_request(&pc->agent) < 0) {
++              LOGW("Failed to resend STUN keepalive");
++            }
++          }
++#endif
+         } else if (elapsed >= CONFIG_STUN_KEEPALIVE_INTERVAL) {
+           if (agent_send_binding_request(&pc->agent) < 0) {
+             LOGW("Failed to send STUN keepalive");

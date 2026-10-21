@@ -137,6 +137,16 @@ char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
       cJSON_Delete(root);
       return NULL;
     }
+    if (boot->ka) {
+      cJSON *ka = cJSON_AddObjectToObject(wf, "ka");
+      if (!ka
+          || !cJSON_AddNumberToObject(ka, "sent", (double)boot->ka->sent)
+          || !cJSON_AddNumberToObject(ka, "resent", (double)boot->ka->resent)
+          || !cJSON_AddNumberToObject(ka, "rescued", (double)boot->ka->rescued)) {
+        cJSON_Delete(root);
+        return NULL;
+      }
+    }
   }
   return finish(root);
 }

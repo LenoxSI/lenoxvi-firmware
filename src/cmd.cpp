@@ -31,6 +31,10 @@
 #include "wifi_trial.h"
 #include "cmd_json.h"
 
+/* libpeer patch 0004 (agent.c): keepalive counters since boot. Declared here
+ * because peer.h doesn't expose agent.h. */
+extern "C" void agent_keepalive_stats(uint32_t *sent, uint32_t *resent, uint32_t *rescued);
+
 static const char *TAG = "cmd";
 
 /* Reply helper shared by every handler: wraps ok + note in the
@@ -217,9 +221,11 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     cmd_audio_stats_t au;
     pipecat_audio_stats(&au);         /* audio-loop health (1.2.27) */
     wifi_ap_record_t ap;              /* reboot black box + link (1.2.29) */
+    cmd_ka_stats_t ka;  /* libpeer 0004 keepalive counters (1.2.36) */
+    agent_keepalive_stats(&ka.sent, &ka.resent, &ka.rescued);
     cmd_boot_info_t bi = {boot_diag_reason(), boot_diag_prev_why(),
                           boot_diag_prev_up_s(), boot_diag_up_s(),
-                          esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0};
+                          esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0, &ka};
     char *reply = cmd_json_info(settings_get_node_name(), mac,
                                 esp_app_get_description()->version, XVF_OTA_TRACK,
                                 pipecat_mic_muted(), dbg_btn, &au, &bi);

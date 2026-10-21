@@ -2,7 +2,7 @@
 # Fetch + patch libpeer into deps/libpeer (gitignored). The firmware does NOT
 # build against plain upstream: patches/libpeer/*.patch are load-bearing
 # (0001: DTLS init + DTLS 1.2 pin; 0002: SCTP/DTLS lock (H2);
-#  0003: SCTP INIT retransmit).
+#  0003: SCTP INIT retransmit; 0004: STUN keepalive retransmit + counters).
 # Idempotent: builds the expected tree (pin + every patch, in order) in a temp
 # dir and compares — identical = already applied; clean pinned tree = patch it;
 # anything else = refuse (someone edited deps/libpeer by hand). Per-patch
