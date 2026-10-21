@@ -12,7 +12,8 @@ extern "C" {
  * Returns true when the message had a "cmd" field (consumed). */
 bool pipecat_cmd_handle(const cJSON *msg);
 
-/* Start the 5-min ping liveness task (call once, post-CONNECTED). */
+/* Start the probe liveness task: first probe 30 s after CONNECTED, then
+ * every 5 min, 90 s to answer (call once, post-CONNECTED). */
 void cmd_liveness_start(void);
 
 /* Mark session-alive (pong or any bot traffic seen). */

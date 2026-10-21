@@ -76,7 +76,7 @@ static void dc_create_delayed_task(void *arg) {
      * session open. */
     cmd_push_firmware_version();
     /* a fresh OTA image earns validity on the first bot
-     * round-trip. The regular liveness probe is 5 min out, and an idle
+     * round-trip. The first liveness probe is 30 s out, and an idle
      * house may send nothing — so probe once now; the bot's pong passes
      * the gate (cmd_note_activity). Asymmetric probe/pong as always: the
      * pong handler never replies. */
@@ -181,7 +181,7 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
                                   30000, NULL, 7, stack_memory, &task_buffer,
                                   0);
     pipecat_init_rtvi(peer_connection, &pipecat_rtvi_callbacks);
-    cmd_liveness_start();  /* 5-min ping liveness (zombie fix) */
+    cmd_liveness_start();  /* probe liveness: 30 s, then every 5 min (zombie fix) */
     // OTA check at CONNECTED (empirical bisect 2026-09-19): the identical
     // version GET crashed deterministically at got-ip (StoreProhibited,
     // ROM memcpy, TLS setup) but worked perfectly here in build 47 — heap

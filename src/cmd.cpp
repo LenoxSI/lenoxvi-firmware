@@ -307,10 +307,16 @@ bool pipecat_cmd_handle(const cJSON *msg) {
 }
 
 /* ── Session liveness (023 zombie fix) ─────────────────────────────
- * Every 5 min the node pings over the data channel; the bot always
- * answers. A silent session (bot gone, or SCTP zombie) gets 90s to
- * prove itself, then a reboot re-rolls the handshake. */
-static bool s_pong_received = true;
+ * The node probes over the data channel; the bot always answers. The
+ * first probe goes out 30 s after the session connects (1.2.35: a session
+ * that is dead from the start used to go unnoticed for 5-10 min), then one
+ * every 5 min. Each probe gets 90 s to be answered; any inbound bot traffic
+ * counts as an answer (cmd_note_activity). No answer = reboot, which
+ * re-rolls the handshake. */
+#define LIVENESS_FIRST_MS   30000
+#define LIVENESS_PERIOD_MS 300000
+#define LIVENESS_WINDOW_MS  90000
+static volatile bool s_pong_received = true;
 
 void cmd_note_activity(void) {
   s_pong_received = true;
@@ -320,12 +326,8 @@ void cmd_note_activity(void) {
 }
 
 static void liveness_task(void *arg) {
+  vTaskDelay(pdMS_TO_TICKS(LIVENESS_FIRST_MS));
   while (1) {
-    vTaskDelay(pdMS_TO_TICKS(300000));
-    if (!s_pong_received) {
-      ESP_LOGE(TAG, "no pong for 90s — session zombie, reboot re-roll");
-      boot_diag_restart("liveness-no-pong");
-    }
     s_pong_received = false;
     /* Probe is cmd "probe" — NOT "ping": the bot answers with
      * {"cmd":"pong"} and the pong handler never replies. The pair is
@@ -335,7 +337,12 @@ static void liveness_task(void *arg) {
     pipecat_rtvi_send_raw(
         "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"probe\","
         "\"ok\":true,\"data\":\"liveness\"}");
-    /* give the round-trip 90s inside the next 5-min window */
+    vTaskDelay(pdMS_TO_TICKS(LIVENESS_WINDOW_MS));
+    if (!s_pong_received) {
+      ESP_LOGE(TAG, "no pong for 90s — session zombie, reboot re-roll");
+      boot_diag_restart("liveness-no-pong");
+    }
+    vTaskDelay(pdMS_TO_TICKS(LIVENESS_PERIOD_MS - LIVENESS_WINDOW_MS));
   }
 }
 
