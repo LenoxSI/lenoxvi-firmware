@@ -800,7 +800,10 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
                 dead_secs = 0;
             }
         } else {
-            if (dead_secs > 0 || heals > 0) ESP_LOGI(LOG_TAG, "I2S bus LIVE (after %d heals)", heals);
+            /* Log the dead -> live transition only: `heals` never resets, so
+             * testing it here printed this line every second forever once
+             * the bus had healed once. */
+            if (dead_secs > 0) ESP_LOGI(LOG_TAG, "I2S bus LIVE (after %d heals)", heals);
             dead_secs = 0;
         }
         diag_peak_hi = 0;
