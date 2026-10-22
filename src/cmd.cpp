@@ -1,8 +1,10 @@
 /* cmd.cpp — bot<->node command schema over the data channel (firmware 1.1.0+).
  *
  * Envelope: {"cmd": "<name>", "id": <n>, ...args}
- * Replies:  {"evt": "cmd_result", "cmd": "<name>", "id": <n>, "ok": bool,
+ * Replies:  {"id": <n>, "evt": "cmd_result", "cmd": "<name>", "ok": bool,
  *            "data": {...}}
+ * The reply echoes the request's "id" (1.2.37; a request without one gets a
+ * reply without one). Unprompted pushes never carry an id.
  *
  * Existing RTVI "type" messages are untouched; anything with a "cmd"
  * field routes here (rtvi.cpp tries cmd first). Bot -> node: ping, pong,
@@ -25,6 +27,7 @@
 #include <freertos/semphr.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "main.h"
 #include "settings.h"
@@ -37,6 +40,30 @@ extern "C" void agent_keepalive_stats(uint32_t *sent, uint32_t *resent, uint32_t
 
 static const char *TAG = "cmd";
 
+/* Request id of the command being handled. Every reply sent while handling
+ * it echoes the id, so the bot can match replies to requests (without it, a
+ * timed-out command's late reply could answer the retry). -1 = the request
+ * carried no id (older bots), or no request at all (unprompted pushes).
+ * Commands are handled one at a time on the RTVI task. */
+static int s_req_id = -1;
+
+/* Send a reply to the request being handled, with its id injected. */
+static void cmd_reply_raw(const char *json) {
+  if (s_req_id < 0 || json == NULL || json[0] != '{' || json[1] == '}') {
+    pipecat_rtvi_send_raw(json);
+    return;
+  }
+  size_t n = strlen(json) + 24;
+  char *buf = (char *)malloc(n);
+  if (buf == NULL) {  /* oom: the reply still goes out, just without the id */
+    pipecat_rtvi_send_raw(json);
+    return;
+  }
+  snprintf(buf, n, "{\"id\":%d,%s", s_req_id, json + 1);
+  pipecat_rtvi_send_raw(buf);
+  free(buf);
+}
+
 /* Reply helper shared by every handler: wraps ok + note in the
  * cmd_result envelope. (Declared in cmd.h; defined before use.) */
 void cmd_send_simple(const char *cmd, bool ok, const char *note) {
@@ -46,7 +73,7 @@ void cmd_send_simple(const char *cmd, bool ok, const char *note) {
    * without it, measured 2026-09-29) — the builder always sets it. */
   char *reply = cmd_json_simple(cmd, ok, note);
   if (!reply) { ESP_LOGE(TAG, "reply: oom (%s)", cmd ? cmd : "?"); return; }
-  pipecat_rtvi_send_raw(reply);
+  cmd_reply_raw(reply);
   cmd_json_free(reply);
 }
 
@@ -136,7 +163,7 @@ static void do_scan(void) {
    * (cmd_json.c); output capped like the old 1400 B buffer. */
   char *reply = cmd_json_scan((const uint8_t (*)[33])names, rssi, kept, 1500);
   if (reply) {
-    pipecat_rtvi_send_raw(reply);
+    cmd_reply_raw(reply);
     cmd_json_free(reply);
   } else {
     cmd_send_simple("scan", false, "oom");
@@ -197,11 +224,10 @@ void cmd_service_mute_push(void) {
   ESP_LOGI(TAG, "mute_push: sent muted=%s", pipecat_mic_muted() ? "true" : "false");
 }
 
-bool pipecat_cmd_handle(const cJSON *msg) {
+static bool cmd_dispatch(const cJSON *msg) {
   const cJSON *j_cmd = cJSON_GetObjectItem(msg, "cmd");
   if (j_cmd == NULL || !cJSON_IsString(j_cmd)) return false;
   const char *cmd = j_cmd->valuestring;
-  const cJSON *j_id = cJSON_GetObjectItem(msg, "id");
 
   if (strcmp(cmd, "ping") == 0) {
     cmd_send_simple("ping", true, "pong");
@@ -230,7 +256,7 @@ bool pipecat_cmd_handle(const cJSON *msg) {
                                 esp_app_get_description()->version, XVF_OTA_TRACK,
                                 pipecat_mic_muted(), dbg_btn, &au, &bi);
     if (reply) {
-      pipecat_rtvi_send_raw(reply);
+      cmd_reply_raw(reply);
       cmd_json_free(reply);
     } else {
       cmd_send_simple("get_info", false, "oom");
@@ -261,7 +287,7 @@ bool pipecat_cmd_handle(const cJSON *msg) {
              "\"cmd\":\"set_mute\",\"ok\":true,"
              "\"data\":{\"muted\":%s}}",
              now ? "true" : "false");
-    pipecat_rtvi_send_raw(reply);
+    cmd_reply_raw(reply);
   } else if (strcmp(cmd, "set_name") == 0) {
     const cJSON *j_name = cJSON_GetObjectItem(msg, "name");
     if (!cJSON_IsString(j_name)) {
@@ -275,7 +301,7 @@ bool pipecat_cmd_handle(const cJSON *msg) {
          * (measured 2026-09-29 19:38). */
         char *reply = cmd_json_name(settings_get_node_name());
         if (reply) {
-          pipecat_rtvi_send_raw(reply);
+          cmd_reply_raw(reply);
           cmd_json_free(reply);
         } else {
           cmd_send_simple("set_name", false, "oom");
@@ -311,6 +337,16 @@ bool pipecat_cmd_handle(const cJSON *msg) {
     cmd_send_simple(cmd, false, "unknown cmd");
   }
   return true;
+}
+
+bool pipecat_cmd_handle(const cJSON *msg) {
+  /* Every reply sent while handling this request echoes its id (if any). */
+  const cJSON *j_id = cJSON_GetObjectItem(msg, "id");
+  s_req_id = (cJSON_IsNumber(j_id) && j_id->valuedouble >= 0 && j_id->valuedouble <= 2147483647.0)
+                 ? j_id->valueint : -1;
+  bool handled = cmd_dispatch(msg);
+  s_req_id = -1;
+  return handled;
 }
 
 /* ── Session liveness (023 zombie fix) ─────────────────────────────
@@ -402,7 +438,7 @@ bool cmd_board_handle(const char *cmd, const cJSON *msg) {
            "\"data\":{\"enabled\":%s,\"volume\":%d,\"speaker_ok\":%s}}",
            enabled ? "true" : "false", board_audio_speaker_volume(),
            board_audio_speaker_ok() ? "true" : "false");
-  pipecat_rtvi_send_raw(reply);
+  cmd_reply_raw(reply);
   return true;
 }
 #endif
