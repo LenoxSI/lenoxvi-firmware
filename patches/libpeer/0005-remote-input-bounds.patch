@@ -1,0 +1,146 @@
+# LenoxVI libpeer patch 0005 (2026-10-24, firmware 1.2.40): bound every
+# write driven by the remote peer's SDP. Upstream trusts the answer:
+# - remote/local candidate tables (10 slots) are filled with no count check, so
+#   an 11th candidate overwrites the agent fields after the array;
+# - the per-line SDP copy goes into a 256-byte stack buffer with no length check;
+# - the candidate parser's sscanf uses bare %s into fixed fields;
+# - ice-ufrag / ice-pwd are copied with the line's length, not the field's.
+# Full tables skip the extra candidate (logged); over-long SDP lines are skipped
+# whole (none of the lines parsed come close); sscanf fields carry widths;
+# ufrag/pwd are clamped. Behaviour is unchanged for well-formed answers.
+diff --git a/src/agent.c b/src/agent.c
+index c92df90..b0ab59d 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -136,6 +136,12 @@ static int agent_create_host_addr(Agent* agent) {
+ 
+   for (i = 0; i < sizeof(addr_type) / sizeof(addr_type[0]); i++) {
+     for (j = 0; j < sizeof(iface_prefx) / sizeof(iface_prefx[0]); j++) {
++      // Slot [count] is filled before we know it is kept, so stop while
++      // there is still room rather than write past the array.
++      if (agent->local_candidates_count >= AGENT_MAX_CANDIDATES) {
++        LOGW("Local candidate table full (%d), skipped host candidates", AGENT_MAX_CANDIDATES);
++        return 0;
++      }
+       ice_candidate = agent->local_candidates + agent->local_candidates_count;
+       // only copy port and family to addr of ice candidate
+       ice_candidate_create(ice_candidate, agent->local_candidates_count, ICE_CANDIDATE_TYPE_HOST,
+@@ -175,6 +181,10 @@ static int agent_create_stun_addr(Agent* agent, Address* serv_addr) {
+ 
+   stun_parse_msg_buf(&recv_msg);
+   memcpy(&bind_addr, &recv_msg.mapped_addr, sizeof(Address));
++  if (agent->local_candidates_count >= AGENT_MAX_CANDIDATES) {
++    LOGW("Local candidate table full (%d), skipped srflx candidate", AGENT_MAX_CANDIDATES);
++    return -1;
++  }
+   IceCandidate* ice_candidate = agent->local_candidates + agent->local_candidates_count;
+   ice_candidate_create(ice_candidate, agent->local_candidates_count++, ICE_CANDIDATE_TYPE_SRFLX, &bind_addr);
+   return ret;
+@@ -233,6 +243,10 @@ static int agent_create_turn_addr(Agent* agent, Address* serv_addr, const char*
+ 
+   stun_parse_msg_buf(&recv_msg);
+   memcpy(&turn_addr, &recv_msg.relayed_addr, sizeof(Address));
++  if (agent->local_candidates_count >= AGENT_MAX_CANDIDATES) {
++    LOGW("Local candidate table full (%d), skipped relay candidate", AGENT_MAX_CANDIDATES);
++    return -1;
++  }
+   IceCandidate* ice_candidate = agent->local_candidates + agent->local_candidates_count++;
+   ice_candidate_create(ice_candidate, agent->local_candidates_count, ICE_CANDIDATE_TYPE_RELAY, &turn_addr);
+   return ret;
+@@ -458,6 +472,7 @@ void agent_set_remote_description(Agent* agent, char* description) {
+   a=candidate:1 1 UDP 1 36.231.28.50 38143 typ srflx
+   */
+   int i;
++  int skipped = 0;
+ 
+   LOGD("Set remote description:\n%s", description);
+ 
+@@ -466,13 +481,25 @@ void agent_set_remote_description(Agent* agent, char* description) {
+ 
+   while ((line_end = strstr(line_start, "\r\n")) != NULL) {
+     if (strncmp(line_start, "a=ice-ufrag:", strlen("a=ice-ufrag:")) == 0) {
+-      strncpy(agent->remote_ufrag, line_start + strlen("a=ice-ufrag:"), line_end - line_start - strlen("a=ice-ufrag:"));
++      // Clamp to the field: the value comes from the remote peer.
++      size_t n = line_end - line_start - strlen("a=ice-ufrag:");
++      if (n > ICE_UFRAG_LENGTH) n = ICE_UFRAG_LENGTH;
++      strncpy(agent->remote_ufrag, line_start + strlen("a=ice-ufrag:"), n);
++      agent->remote_ufrag[n] = '\0';
+ 
+     } else if (strncmp(line_start, "a=ice-pwd:", strlen("a=ice-pwd:")) == 0) {
+-      strncpy(agent->remote_upwd, line_start + strlen("a=ice-pwd:"), line_end - line_start - strlen("a=ice-pwd:"));
++      size_t n = line_end - line_start - strlen("a=ice-pwd:");
++      if (n > ICE_UPWD_LENGTH) n = ICE_UPWD_LENGTH;
++      strncpy(agent->remote_upwd, line_start + strlen("a=ice-pwd:"), n);
++      agent->remote_upwd[n] = '\0';
+ 
+     } else if (strncmp(line_start, "a=candidate:", strlen("a=candidate:")) == 0) {
+-      if (ice_candidate_from_description(&agent->remote_candidates[agent->remote_candidates_count], line_start, line_end) == 0) {
++      // The parse below uses slot [count] as scratch, so a full table must
++      // skip the line: an extra candidate would overwrite the agent fields
++      // that follow the array.
++      if (agent->remote_candidates_count >= AGENT_MAX_CANDIDATES) {
++        skipped++;
++      } else if (ice_candidate_from_description(&agent->remote_candidates[agent->remote_candidates_count], line_start, line_end) == 0) {
+         for (i = 0; i < agent->remote_candidates_count; i++) {
+           if (strcmp(agent->remote_candidates[i].foundation, agent->remote_candidates[agent->remote_candidates_count].foundation) == 0) {
+             break;
+@@ -487,6 +514,10 @@ void agent_set_remote_description(Agent* agent, char* description) {
+     line_start = line_end + 2;
+   }
+ 
++  if (skipped > 0) {
++    LOGW("Remote candidate table full (%d), skipped %d candidate lines", AGENT_MAX_CANDIDATES, skipped);
++  }
++
+   LOGD("remote ufrag: %s", agent->remote_ufrag);
+   LOGD("remote upwd: %s", agent->remote_upwd);
+ }
+diff --git a/src/ice.c b/src/ice.c
+index 756e961..1d50293 100644
+--- a/src/ice.c
++++ b/src/ice.c
+@@ -90,7 +90,12 @@ int ice_candidate_from_description(IceCandidate* candidate, char* description, c
+ 
+   // a=candidate:448736988 1 udp 2122260223 172.17.0.1 49250 typ host generation 0 network-id 1 network-cost 50
+   // a=candidate:udpcandidate 1 udp 120 192.168.1.102 8000 typ host
+-  if (sscanf(candidate_start, "%s %d %s %" PRIu32 " %s %" PRIu32 " typ %s",
++  // Every %s carries a width: the line comes from the remote peer, and a bare
++  // %s lets one long token overflow these fixed buffers. Widths = size - 1.
++  _Static_assert(sizeof(((IceCandidate*)0)->foundation) == 33, "foundation width");
++  _Static_assert(sizeof(((IceCandidate*)0)->transport) == 33, "transport width");
++  _Static_assert(ADDRSTRLEN == 46, "addrstring width");
++  if (sscanf(candidate_start, "%32s %d %32s %" PRIu32 " %45s %" PRIu32 " typ %15s",
+              candidate->foundation,
+              &candidate->component,
+              candidate->transport,
+diff --git a/src/peer_connection.c b/src/peer_connection.c
+index f03795b..22d898b 100644
+--- a/src/peer_connection.c
++++ b/src/peer_connection.c
+@@ -416,6 +416,13 @@ void peer_connection_set_remote_description(PeerConnection* pc, const char* sdp,
+ 
+   while ((line = strstr(start, "\r\n"))) {
+     line = strstr(start, "\r\n");
++    // buf is a fixed stack buffer: a longer line would overflow it. None of
++    // the lines parsed below come close, so skip an over-long one whole.
++    if ((size_t)(line - start) >= sizeof(buf)) {
++      LOGW("SDP line too long (%d bytes), skipped", (int)(line - start));
++      start = line + 2;
++      continue;
++    }
+     strncpy(buf, start, line - start);
+     buf[line - start] = '\0';
+ 
+@@ -636,6 +643,12 @@ char* peer_connection_lookup_sid_label(PeerConnection* pc, uint16_t sid) {
+ 
+ int peer_connection_add_ice_candidate(PeerConnection* pc, char* candidate) {
+   Agent* agent = &pc->agent;
++  // Slot [count] is parsed into directly, so a full table must refuse the
++  // candidate rather than write past the array.
++  if (agent->remote_candidates_count >= AGENT_MAX_CANDIDATES) {
++    LOGW("Remote candidate table full (%d), skipped candidate", AGENT_MAX_CANDIDATES);
++    return -1;
++  }
+   if (ice_candidate_from_description(&agent->remote_candidates[agent->remote_candidates_count], candidate, candidate + strlen(candidate)) != 0) {
+     return -1;
+   }
