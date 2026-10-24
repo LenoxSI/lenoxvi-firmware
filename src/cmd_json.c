@@ -116,7 +116,8 @@ char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
         || !cJSON_AddNumberToObject(au, "frames", (double)audio->frames)
         || !cJSON_AddNumberToObject(au, "ovf", (double)audio->ovf)
         || !cJSON_AddNumberToObject(au, "max_work_ms", (double)(audio->max_work_us / 100) / 10.0)
-        || !cJSON_AddNumberToObject(au, "max_gap_ms", (double)(audio->max_gap_us / 100) / 10.0)) {
+        || !cJSON_AddNumberToObject(au, "max_gap_ms", (double)(audio->max_gap_us / 100) / 10.0)
+        || !cJSON_AddNumberToObject(au, "zero_s", (double)audio->zero_s)) {
       cJSON_Delete(root);
       return NULL;
     }

@@ -37,6 +37,7 @@ typedef struct cmd_audio_stats_t {
   uint32_t ovf;          /* I2S RX DMA queue overflows since boot */
   uint32_t max_work_us;  /* worst decimate + encode + send, since last read */
   uint32_t max_gap_us;   /* worst gap between frame reads, since last read */
+  uint32_t zero_s;       /* seconds of all-zero mic audio while not muted, since boot */
 } cmd_audio_stats_t;
 
 /* STUN keepalive counters since boot (1.2.36, libpeer patch 0004):

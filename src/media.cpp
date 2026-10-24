@@ -74,8 +74,6 @@
 static i2c_master_bus_handle_t i2c_bus  = NULL;
 static i2s_chan_handle_t        tx_chan  = NULL;
 static i2s_chan_handle_t        rx_chan  = NULL;
-static i2s_std_config_t         g_std_cfg;    /* saved for full I2S re-init (heal) */
-static i2s_chan_config_t        g_chan_cfg;
 #endif
 static std::atomic<bool>        is_playing = false;
 
@@ -267,6 +265,10 @@ static volatile uint32_t s_au_frames = 0;
 static volatile uint32_t s_au_ovf = 0;
 static volatile uint32_t s_au_max_work_us = 0;
 static volatile uint32_t s_au_max_gap_us = 0;
+/* Seconds the mic delivered pure digital zeros while NOT muted. The XMOS can
+ * hold its I2S output at zero for minutes after boot while the bus itself
+ * keeps running; this makes that visible in get_info without serial. */
+static volatile uint32_t s_au_zero_s = 0;
 static volatile int s_au_core = -1;
 
 #if !LENOXVI_BOARD_WAVESHARE  /* waveshare: no I2S channel here to hook (ovf stays 0) */
@@ -282,6 +284,7 @@ extern "C" void pipecat_audio_stats(cmd_audio_stats_t *out) {
   out->ovf = s_au_ovf;
   out->max_work_us = s_au_max_work_us;
   out->max_gap_us = s_au_max_gap_us;
+  out->zero_s = s_au_zero_s;
   s_au_max_work_us = 0;      /* worst cases are per read window */
   s_au_max_gap_us = 0;
 }
@@ -626,13 +629,8 @@ void pipecat_init_audio_capture() {
     std_cfg.gpio_cfg.din  = I2S_DIN_PIN;
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_chan, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_chan, &std_cfg));
-    /* Stash the std config so the heal path can do a FULL teardown + re-init
-     * (disable/enable alone leaves MCLK running and never re-rolls the
-     * XMOS lock — 12/12 heals failed that way on 2026-09-16). */
-    g_std_cfg = std_cfg;
-    g_chan_cfg = chan_cfg;
     /* Audio-loop health: count mic DMA overflows (lost audio). Registered
-     * in the READY state, before enable; survives the heal's disable/enable.
+     * in the READY state, before enable.
      * A registration failure only loses the counter, never audio. */
     i2s_event_callbacks_t mic_cbs = {};
     mic_cbs.on_recv_q_ovf = on_mic_queue_overflow;
@@ -727,7 +725,7 @@ void pipecat_init_audio_encoder() {
 }
 
 void pipecat_send_audio(PeerConnection *peer_connection) {
-#if LENOXVI_BOARD_WAVESHARE  /* waveshare: the board component hands over 16 kHz mono directly — no 48k decimation/heal */
+#if LENOXVI_BOARD_WAVESHARE  /* waveshare: the board component hands over 16 kHz mono directly — no 48k decimation */
     if (mic_mono16 == NULL) return;
     board_audio_read(mic_mono16, PCM_MONO_SAMPLES);   /* blocks ~20 ms; silence on failure */
     /* audio-loop health: gap since the previous frame read, then work time */
@@ -767,8 +765,8 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
     /* stereo32@48k NATIVE (master image) -> mono16@16k. Audio in the HIGH 16
      * bits of every frame; linear boxcar decimation over all 6 words per
      * output sample (Kyzcreig's proven decimator — LP before downsample,
-     * formants survive for STT). Per-second hi16/lo16 peaks feed the dead-bus
-     * self-heal below (a live bus is never all-zero in both halves). */
+     * formants survive for STT). Per-second hi16/lo16 peaks feed the
+     * zero-seconds counter below (a live mic is never all-zero in both halves). */
     static int32_t diag_peak_hi = 0;
     static int32_t diag_peak_lo = 0;
     static uint32_t diag_frames = 0;
@@ -785,31 +783,12 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
         mic_mono16[i] = hi;
     }
     if (++diag_frames % 50 == 0) {  /* once per second at 50 fps */
-        /* SELF-HEAL (2026-09-16): the XMOS I2S-slave output engages at
-         * startup only sometimes (a lock lottery vs. our MCLK/BCLK start;
-         * a XIAO-only reset drops MCLK for ~7s and re-rolls it). A live bus
-         * never reads all-zero — even a silent room shows codec LSB noise in
-         * lo16 — so 3 consecutive all-zero seconds == dead bus. Re-cycle the
-         * I2S channels (drops and restores MCLK/BCLK/WS) to re-roll until it
-         * locks. Bounded so a truly broken bus can't loop forever. */
-        static int dead_secs = 0, heals = 0;
-        if (diag_peak_hi == 0 && diag_peak_lo == 0) {
-            if (++dead_secs >= 3 && heals < 12) {
-                heals++;
-                ESP_LOGW(LOG_TAG, "I2S bus dead %ds — re-cycling channels (heal #%d)", dead_secs, heals);
-                i2s_channel_disable(rx_chan);
-                i2s_channel_disable(tx_chan);
-                vTaskDelay(pdMS_TO_TICKS(150));
-                i2s_channel_enable(tx_chan);
-                i2s_channel_enable(rx_chan);
-                dead_secs = 0;
-            }
-        } else {
-            /* Log the dead -> live transition only: `heals` never resets, so
-             * testing it here printed this line every second forever once
-             * the bus had healed once. */
-            if (dead_secs > 0) ESP_LOGI(LOG_TAG, "I2S bus LIVE (after %d heals)", heals);
-            dead_secs = 0;
+        /* All-zero second: count it unless muted (a muted array XMOS sends
+         * exact zeros by design). No recovery attempt here: the bus keeps
+         * running while the XMOS outputs zeros, so cycling our I2S channels
+         * changes nothing; it only stalled this loop 150 ms per try. */
+        if (diag_peak_hi == 0 && diag_peak_lo == 0 && !mic_mute.load()) {
+            s_au_zero_s = s_au_zero_s + 1;
         }
         diag_peak_hi = 0;
         diag_peak_lo = 0;
