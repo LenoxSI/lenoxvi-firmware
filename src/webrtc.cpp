@@ -219,7 +219,21 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
 }
 
 static void pipecat_on_icecandidate_task(char *description, void *user_data) {
-  char *local_buffer = (char *)malloc(MAX_HTTP_OUTPUT_BUFFER + 1);
+  /* The answer buffer is short-lived but sized for the largest answer, so
+   * it goes to PSRAM first to keep internal RAM free for DTLS setup. */
+  char *local_buffer = (char *)heap_caps_malloc(
+      MAX_HTTP_OUTPUT_BUFFER + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (local_buffer == NULL) {
+    local_buffer = (char *)malloc(MAX_HTTP_OUTPUT_BUFFER + 1);
+  }
+  if (local_buffer == NULL) {
+    ESP_LOGE(LOG_TAG, "offer answer buffer alloc failed (%d bytes)",
+             MAX_HTTP_OUTPUT_BUFFER + 1);
+#ifndef LINUX_BUILD
+    boot_diag_restart("offer-oom");
+#endif
+    return;
+  }
   memset(local_buffer, 0, MAX_HTTP_OUTPUT_BUFFER + 1);
   pipecat_http_request(description, local_buffer);
   peer_connection_set_remote_description(peer_connection, local_buffer,

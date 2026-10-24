@@ -11,6 +11,10 @@
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
 
+/* Every body byte the server sent, kept or not. The copy below stops at the
+ * buffer size, so a total above it means the answer was cut short. */
+static int answer_total_len;
+
 static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
   static int output_len;
   switch (evt->event_id) {
@@ -57,6 +61,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
         }
       }
       output_len += copy_len;
+      answer_total_len += evt->data_len;
 
       break;
     }
@@ -118,6 +123,7 @@ void pipecat_http_request(char *offer, char *answer) {
   esp_http_client_set_header(client, "Content-Type", "application/json");
   esp_http_client_set_post_field(client, j_offer_str, strlen(j_offer_str));
 
+  answer_total_len = 0;
   esp_err_t err = esp_http_client_perform(client);
   int status_code = esp_http_client_get_status_code(client);
   if (err != ESP_OK || status_code != 200) {
@@ -132,6 +138,16 @@ void pipecat_http_request(char *offer, char *answer) {
    * Wi-Fi trial: a network that lets TCP through but blocks UDP would pass,
    * drop the old creds, then never connect. The trial passes on the first
    * bot message over the data channel instead (cmd_note_activity). */
+
+  /* A cut-short answer can never parse; give it its own tag so it is not
+   * mistaken for a malformed one. */
+  if (answer_total_len > MAX_HTTP_OUTPUT_BUFFER) {
+    ESP_LOGE(LOG_TAG, "HTTP answer too big: %d bytes, buffer holds %d",
+             answer_total_len, MAX_HTTP_OUTPUT_BUFFER);
+#ifndef LINUX_BUILD
+    boot_diag_restart("offer-too-big");
+#endif
+  }
 
   cJSON *j_response = cJSON_Parse((const char *)answer);
   if (j_response == NULL) {

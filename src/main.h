@@ -1,7 +1,7 @@
 #include <peer.h>
 
 #define LOG_TAG "pipecat"
-#define MAX_HTTP_OUTPUT_BUFFER 4096
+#define MAX_HTTP_OUTPUT_BUFFER 16384  /* bot HTTP answer (JSON-wrapped SDP); heap, freed after use */
 #define HTTP_TIMEOUT_MS 10000
 #define TICK_INTERVAL 15
 
