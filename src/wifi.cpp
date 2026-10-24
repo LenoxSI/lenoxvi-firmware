@@ -1,7 +1,9 @@
 #include <assert.h>
 #include <esp_event.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <esp_wifi.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,12 +44,16 @@ void pipecat_start_webrtc() {
 
 /* ── Wi-Fi change trial (M1, 1.2.23) ─────────────────────────────────
  * Started at boot ONLY while a trial is pending (settings_wifi_trial_boot
- * decided this boot is an attempt). The offer POST's HTTP 200 (http.cpp)
- * raises g_bot_reached — that callback runs on a libpeer task whose stack we
- * don't control, so it only sets a flag; this task (internal-RAM stack,
- * xTaskCreate) does the NVS write. No answer within WIFI_TRIAL_TIMEOUT_MS
- * (wrong password, wrong network, bot unreachable) = reboot: the next boot
- * counts the next attempt, and after the last one the old network returns. */
+ * decided this boot is an attempt). The trial passes on the first inbound
+ * bot message over the data channel: cmd_note_activity() (cmd.cpp) raises
+ * g_bot_reached, the same hook the OTA health gate uses. An HTTP 200 on the
+ * offer POST is not enough — it only proves TCP to the bot, while a working
+ * session also needs UDP, ICE and DTLS to get through the new network.
+ * That caller runs on the data-channel path, on a stack we don't control, so it
+ * only sets a flag; this task (internal-RAM stack, xTaskCreate) does the NVS
+ * write. No bot message within WIFI_TRIAL_TIMEOUT_MS (wrong password, wrong
+ * network, bot unreachable, UDP blocked) = reboot: the next boot counts the
+ * next attempt, and after the last one the old network returns. */
 #define WIFI_TRIAL_TIMEOUT_MS 90000
 static volatile bool g_bot_reached = false;
 
@@ -86,6 +92,44 @@ void pipecat_wifi_trial_start(void) {
   ESP_LOGW(LOG_TAG, "wifi trial: waiting up to %d s for the bot", WIFI_TRIAL_TIMEOUT_MS / 1000);
 }
 
+/* Delayed reconnect runs from a one-shot esp_timer, not a sleep in the
+ * event handler: the handler runs on the default event loop task, and
+ * blocking there for up to 30 s stalls every other event handler (IP,
+ * HTTP, OTA) for the whole AP outage. The callback runs on the esp_timer
+ * task (small stack), so it only kicks the driver. */
+static esp_timer_handle_t s_reconnect_timer = NULL;
+
+static void wifi_reconnect_timer_cb(void *arg) {
+  esp_err_t err = esp_wifi_connect();
+  if (err != ESP_OK) ESP_LOGE(LOG_TAG, "delayed esp_wifi_connect failed: %d", err);
+}
+
+/* Reconnect after delay_ms. Any timer failure falls back to an immediate
+ * connect so a retry is never lost. */
+static void wifi_schedule_reconnect(int delay_ms) {
+  if (delay_ms > 0 && s_reconnect_timer == NULL) {
+    const esp_timer_create_args_t args = {
+        .callback = &wifi_reconnect_timer_cb,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "wifi_reconnect",
+        .skip_unhandled_events = false,
+    };
+    esp_err_t err = esp_timer_create(&args, &s_reconnect_timer);
+    if (err != ESP_OK) {
+      ESP_LOGE(LOG_TAG, "reconnect timer create failed: %d", err);
+      s_reconnect_timer = NULL;
+    }
+  }
+  if (delay_ms > 0 && s_reconnect_timer != NULL) {
+    esp_timer_stop(s_reconnect_timer);  // ESP_ERR_INVALID_STATE if idle: fine
+    esp_err_t err = esp_timer_start_once(s_reconnect_timer, (uint64_t)delay_ms * 1000);
+    if (err == ESP_OK) return;
+    ESP_LOGE(LOG_TAG, "reconnect timer start failed: %d — connecting now", err);
+  }
+  esp_wifi_connect();
+}
+
 static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data) {
   static int s_retry_num = 0;  // reset to 0 on IP_EVENT_STA_GOT_IP
@@ -96,17 +140,22 @@ static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
     /* 023 fix (2026-09-29): the old 5-strike counter gave up for the
      * whole boot after a ~30s body-block — infinite retries with
      * backoff instead; only a got-ip resets the backoff. */
-    int delay_ms = (s_retry_num < 5) ? 0 : (1 << (s_retry_num - 5)) * 1000;
+    /* Clamp the shift before it can overflow: 2^5 s already exceeds the
+     * 30 s cap, and a larger shift is undefined behaviour that went
+     * negative (zero delay, hot retry loop) after a long outage. */
+    int exp = (s_retry_num < 5) ? -1 : s_retry_num - 5;
+    if (exp > 5) exp = 5;
+    int delay_ms = (exp < 0) ? 0 : (1 << exp) * 1000;
     if (delay_ms > 30000) delay_ms = 30000;  // cap at 30s
-    if (delay_ms > 0) vTaskDelay(pdMS_TO_TICKS(delay_ms));
-    esp_wifi_connect();
-    s_retry_num++;
+    wifi_schedule_reconnect(delay_ms);
+    if (s_retry_num < INT_MAX) s_retry_num++;  // saturate: never wraps
     ESP_LOGI(LOG_TAG, "retrying connect (attempt %d)", s_retry_num);
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
     ESP_LOGI(LOG_TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
     g_wifi_connected = true;
     s_retry_num = 0;  // reset retry counter on successful connection
+    if (s_reconnect_timer) esp_timer_stop(s_reconnect_timer);  // no stale retry
     rgb_set_state(RGB_STATE_WIFI_UP);
     // OTA check does NOT run here (empirical bisect 2026-09-19): the same
     // version GET that works at CONNECTED (build 47: 200 OK, update found)

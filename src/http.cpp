@@ -128,9 +128,10 @@ void pipecat_http_request(char *offer, char *answer) {
 #endif
   }
 
-  /* M1: the bot answered on this network — a pending Wi-Fi trial passes
-   * (flag only: this runs on a libpeer callback task, no NVS here). */
-  pipecat_wifi_bot_reached();
+  /* A 200 here proves only TCP to the bot, so it does NOT pass a pending
+   * Wi-Fi trial: a network that lets TCP through but blocks UDP would pass,
+   * drop the old creds, then never connect. The trial passes on the first
+   * bot message over the data channel instead (cmd_note_activity). */
 
   cJSON *j_response = cJSON_Parse((const char *)answer);
   if (j_response == NULL) {

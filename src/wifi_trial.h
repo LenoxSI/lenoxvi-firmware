@@ -3,9 +3,10 @@
  * A dashboard Wi-Fi change is a TRIAL that survives reboots: set_wifi saves
  * the current creds as "previous", stores the new ones and sets trial = 1,
  * then reboots. Every boot during a trial counts one attempt BEFORE trying
- * (so a crash mid-attempt still counts); an attempt passes only when the bot
- * answered the offer POST (HTTP 200) — "got an IP" is not enough (a guest
- * network or VLAN gives an IP but never reaches the bot). After
+ * (so a crash mid-attempt still counts); an attempt passes only when a bot
+ * message arrives over the data channel — "got an IP" is not enough (a guest
+ * network or VLAN gives an IP but never reaches the bot), and neither is the
+ * offer's HTTP 200 (TCP can get through where UDP is blocked). After
  * WIFI_TRIAL_MAX_BOOTS failed boots the previous creds come back.
  *
  * Pure C, no ESP-IDF headers: tests/test_wifi_trial.c runs it on the host. */

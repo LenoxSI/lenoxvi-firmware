@@ -84,9 +84,12 @@ void cmd_send_simple(const char *cmd, bool ok, const char *note) {
  * ~19:20: every set_name → "Guru Meditation: Core 0 panic'ed
  * (Double exception)", A1=0x60100000 (PSRAM SP), backtrace CORRUPTED,
  * node rebooted before acking. Reads are safe (no cache suspension —
- * settings_load at boot is fine); WRITES go through this runner: a
- * short-lived task on a static internal stack. One slot is safe —
- * the RTVI task serializes commands (same pattern as liveness). */
+ * settings_load at boot is fine); WRITES go through this runner: one
+ * long-lived worker task on a static internal stack, created on first
+ * use and never deleted. (A task per write on the same static buffers was
+ * unsafe: a deleted task's TCB is only reaped later by the idle task, so a
+ * second write straight after the first could re-create a task on a TCB
+ * the kernel still had on its lists.) */
 typedef struct {
   int kind;  /* 0 = set_name, 1 = set_wifi (starts a trial), 2 = mute (a != NULL = muted) */
   const char *a, *b;
@@ -94,31 +97,59 @@ typedef struct {
 } nvs_job_t;
 
 static nvs_job_t s_job;
+static SemaphoreHandle_t s_job_lock;  /* one job at a time */
 static SemaphoreHandle_t s_job_done;
+static TaskHandle_t s_job_worker;
 
 static void nvs_job_task(void *arg) {
-  nvs_job_t *job = (nvs_job_t *)arg;
-  job->rc = job->kind == 0 ? settings_set_node_name(job->a)
-          : job->kind == 1 ? settings_begin_wifi_trial(job->a, job->b)
-                           : settings_set_muted(job->a != NULL);
-  xSemaphoreGive(s_job_done);
-  vTaskDelete(NULL);
+  (void)arg;
+  while (1) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  /* nvs_run posts a job */
+    s_job.rc = s_job.kind == 0 ? settings_set_node_name(s_job.a)
+             : s_job.kind == 1 ? settings_begin_wifi_trial(s_job.a, s_job.b)
+                               : settings_set_muted(s_job.a != NULL);
+    xSemaphoreGive(s_job_done);
+  }
 }
 
 static int nvs_run(int kind, const char *a, const char *b) {
+  /* A plain static array is internal DRAM — it must stay that way (never
+   * PSRAM), or the write double-faults exactly as on the RTVI stack. */
   static StaticTask_t buf;
   static StackType_t stack[6144 / sizeof(StackType_t)];
-  if (s_job_done == NULL) {
-    s_job_done = xSemaphoreCreateBinary();
-    if (s_job_done == NULL) return -100;
+  /* One-time setup: 0 = not yet, 1 = being set up, 2 = ready. The claim
+   * keeps two first callers from building two workers on one buffer. */
+  static int ready = 0;
+  int st = 0;
+  if (__atomic_compare_exchange_n(&ready, &st, 1, false,
+                                  __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    if (s_job_lock == NULL) s_job_lock = xSemaphoreCreateMutex();
+    if (s_job_done == NULL) s_job_done = xSemaphoreCreateBinary();
+    if (s_job_lock == NULL || s_job_done == NULL) {
+      __atomic_store_n(&ready, 0, __ATOMIC_RELEASE);  /* retry next call */
+      return -100;
+    }
+    s_job_worker = xTaskCreateStaticPinnedToCore(
+        nvs_job_task, "nvs_write", 6144 / sizeof(StackType_t), NULL,
+        5, stack, &buf, 0);
+    if (s_job_worker == NULL) {
+      __atomic_store_n(&ready, 0, __ATOMIC_RELEASE);
+      return -102;
+    }
+    __atomic_store_n(&ready, 2, __ATOMIC_RELEASE);
+  } else {
+    while ((st = __atomic_load_n(&ready, __ATOMIC_ACQUIRE)) == 1) {
+      vTaskDelay(1);  /* another caller is creating the worker */
+    }
+    if (st != 2) return -100;
   }
+  xSemaphoreTake(s_job_lock, portMAX_DELAY);
   s_job.kind = kind; s_job.a = a; s_job.b = b; s_job.rc = -101;
-  TaskHandle_t th = xTaskCreateStaticPinnedToCore(
-      nvs_job_task, "nvs_write", 6144 / sizeof(StackType_t), &s_job,
-      5, stack, &buf, 0);
-  if (th == NULL) return -102;
+  xTaskNotifyGive(s_job_worker);
   xSemaphoreTake(s_job_done, portMAX_DELAY);
-  return s_job.rc;
+  int rc = s_job.rc;
+  xSemaphoreGive(s_job_lock);
+  return rc;
 }
 
 static void do_scan(void) {
@@ -236,9 +267,15 @@ static bool cmd_dispatch(const cJSON *msg) {
      * noted by rtvi.cpp's dispatch — deliberately NO reply here:
      * asymmetry is what makes the loop structurally impossible. */
   } else if (strcmp(cmd, "restart") == 0) {
-    cmd_send_simple("restart", true, "rebooting");
-    vTaskDelay(pdMS_TO_TICKS(300));  /* let the ack leave the wire */
-    boot_diag_restart("cmd-restart");
+    if (pipecat_ota_busy()) {
+      /* A reboot mid-flash throws the download away; the OTA task reboots
+       * into the new image itself when the flash completes. */
+      cmd_send_simple("restart", false, "ota in progress");
+    } else {
+      cmd_send_simple("restart", true, "rebooting");
+      vTaskDelay(pdMS_TO_TICKS(300));  /* let the ack leave the wire */
+      boot_diag_restart("cmd-restart");
+    }
   } else if (strcmp(cmd, "get_info") == 0) {
     int dbg_btn;
     pipecat_mute_hw_diag(&dbg_btn);   /* array: raw mute-button bit (support/diagnostics) */
@@ -315,16 +352,21 @@ static bool cmd_dispatch(const cJSON *msg) {
   } else if (strcmp(cmd, "set_wifi") == 0) {
     /* M1 (1.2.23): a Wi-Fi change is a TRIAL that survives reboots — store
      * previous + new + trial=1 in one NVS commit, ack, reboot. The boot path
-     * verifies by REACHING THE BOT (offer POST 200, not just an IP) and rolls
-     * back to the previous network after 3 failed boots (wifi_trial.h). The
-     * old flow kept the previous creds in RAM and called "got an IP"
-     * success — a guest network/VLAN stranded the node in a reboot loop. */
+     * verifies by REACHING THE BOT (a bot message over the data channel, not
+     * just an IP or an HTTP answer) and rolls back to the previous network
+     * after 3 failed boots (wifi_trial.h). The old flow kept the previous
+     * creds in RAM and called "got an IP" success — a guest network/VLAN
+     * stranded the node in a reboot loop. */
     const cJSON *j_ssid = cJSON_GetObjectItem(msg, "ssid");
     const cJSON *j_pass = cJSON_GetObjectItem(msg, "pass");
     if (!cJSON_IsString(j_ssid) || !cJSON_IsString(j_pass) || !j_ssid->valuestring[0]) {
       cmd_send_simple("set_wifi", false, "missing ssid/pass");
     } else if (!wifi_pass_acceptable(j_pass->valuestring)) {
       cmd_send_simple("set_wifi", false, "password must be up to 63 characters, or 64 hex digits");
+    } else if (pipecat_ota_busy()) {
+      /* Checked before the NVS write: storing a trial and then refusing to
+       * reboot would leave it armed for whatever boot comes next. */
+      cmd_send_simple("set_wifi", false, "ota in progress");
     } else if (nvs_run(1, j_ssid->valuestring, j_pass->valuestring) != 0) {
       cmd_send_simple("set_wifi", false, "nvs error");
     } else {
@@ -363,9 +405,13 @@ static volatile bool s_pong_received = true;
 
 void cmd_note_activity(void) {
   s_pong_received = true;
-  /* inbound bot traffic over the data channel = the image works
-   * end to end -> pass the OTA health gate (no-op once validated). */
+  /* Inbound bot traffic over the data channel = the image and the network
+   * work end to end (ICE, DTLS and SCTP up — not just TCP to the bot). That
+   * passes both gates: the OTA health gate, and a pending Wi-Fi trial (a
+   * network that lets TCP through but blocks UDP must fail the trial). Both
+   * are no-ops once passed; the Wi-Fi one only sets a flag (no NVS). */
   pipecat_ota_health_ok();
+  pipecat_wifi_bot_reached();
 }
 
 static void liveness_task(void *arg) {
@@ -381,6 +427,13 @@ static void liveness_task(void *arg) {
         "{\"type\":\"cmd_result\",\"evt\":\"cmd_result\",\"cmd\":\"probe\","
         "\"ok\":true,\"data\":\"liveness\"}");
     vTaskDelay(pdMS_TO_TICKS(LIVENESS_WINDOW_MS));
+    if (!s_pong_received && pipecat_ota_busy()) {
+      /* A firmware flash starves the session, so a missed pong is expected;
+       * rebooting would throw the download away. Wait it out — a good flash
+       * reboots into the new image, a failed one leaves us to decide. */
+      ESP_LOGW(TAG, "no pong for 90s, but an OTA flash is in flight — holding the reboot");
+      while (pipecat_ota_busy()) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
     if (!s_pong_received) {
       ESP_LOGE(TAG, "no pong for 90s — session zombie, reboot re-roll");
       boot_diag_restart("liveness-no-pong");

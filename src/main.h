@@ -7,7 +7,7 @@
 
 // Wifi
 extern void pipecat_init_wifi();
-extern void pipecat_wifi_bot_reached(void);   /* M1: offer POST got 200 (flag only — any task) */
+extern void pipecat_wifi_bot_reached(void);   /* first bot message over the data channel (flag only — any task) */
 extern void pipecat_wifi_trial_start(void);   /* M1: start the trial watcher if a trial is pending */
 
 // WebRTC / Media
