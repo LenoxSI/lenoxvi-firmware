@@ -29,9 +29,9 @@ int main(void) {
   emit("info_hostile", cmd_json_info("x\",\"muted\":false,\"y\":\"", mac, "1.2.20", "flex", false, -2, NULL, NULL));
   /* audio-loop health (1.2.27): lifetime counters near uint32 max must
    * stay exact (a double holds 2^53), ms rounds DOWN to 0.1 */
-  const cmd_audio_stats_t au = {1, 4294967295u, 3, 12345, 40999};
+  const cmd_audio_stats_t au = {1, 4294967295u, 3, 12345, 40999, 4294967294u};
   emit("info_audio", cmd_json_info("a", mac, "1.2.27", "array", false, 1, &au, NULL));
-  const cmd_audio_stats_t au0 = {-1, 0, 0, 0, 0};
+  const cmd_audio_stats_t au0 = {-1, 0, 0, 0, 0, 0};
   emit("info_audio_idle", cmd_json_info("a", mac, "1.2.27", "flex", false, -1, &au0, NULL));
 
   /* reboot black box (1.2.29): a crash (no tag), a tagged deliberate

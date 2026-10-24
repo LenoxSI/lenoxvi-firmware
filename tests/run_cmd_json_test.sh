@@ -58,11 +58,12 @@ check("info: no audio stats -> no audio key", "audio" not in J("info_plain")["da
 d = J("info_audio")["data"]
 check("info audio: all fields, counters exact, ms floored to 0.1",
       d.get("audio") == {"core": 1, "frames": 4294967295, "ovf": 3,
-                         "max_work_ms": 12.3, "max_gap_ms": 40.9}, d.get("audio"))
+                         "max_work_ms": 12.3, "max_gap_ms": 40.9,
+                         "zero_s": 4294967294}, d.get("audio"))
 check("info audio: existing fields untouched", d["fw"] == "1.2.27" and d["mute_hw"] == {"btn": 1}, d)
 d = J("info_audio_idle")["data"]
 check("info audio: not-started loop reports core -1 and zeros",
-      d.get("audio") == {"core": -1, "frames": 0, "ovf": 0, "max_work_ms": 0, "max_gap_ms": 0}, d.get("audio"))
+      d.get("audio") == {"core": -1, "frames": 0, "ovf": 0, "max_work_ms": 0, "max_gap_ms": 0, "zero_s": 0}, d.get("audio"))
 d = J("info_plain")["data"]
 check("info boot: block absent when no boot info (older callers)", "boot" not in d and "wifi" not in d, d)
 d = J("info_boot_panic")["data"]
