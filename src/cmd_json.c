@@ -108,6 +108,20 @@ char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
     cJSON_Delete(root);
     return NULL;
   }
+  if (audio && audio->btn_diag) {
+    bool ok;
+    if (audio->btn_raw_seen) {
+      char raw[9];
+      snprintf(raw, sizeof(raw), "%08lx", (unsigned long)audio->btn_raw);
+      ok = cJSON_AddStringToObject(hw, "raw", raw) != NULL;
+    } else {
+      ok = cJSON_AddNullToObject(hw, "raw") != NULL;
+    }
+    if (!ok || !cJSON_AddNumberToObject(hw, "zero", (double)audio->btn_zero)) {
+      cJSON_Delete(root);
+      return NULL;
+    }
+  }
   if (audio) {
     /* ms with 0.1 resolution: frames are 20 ms, so sub-ms detail is noise */
     cJSON *au = cJSON_AddObjectToObject(data, "audio");

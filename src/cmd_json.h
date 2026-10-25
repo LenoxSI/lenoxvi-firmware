@@ -48,6 +48,14 @@ typedef struct cmd_audio_stats_t {
   uint8_t dsp_rb;
   float dsp_mic_gain;
   uint8_t dsp_ver[3];
+  /* Array mute button diagnostics (1.2.45), emitted into "mute_hw" when
+   * btn_diag: the last real GPI reply (raw, hex; null until one arrived) and
+   * how many all-zero replies were rejected (zero). An all-zero reply reads
+   * as "status done, button pressed" and caused phantom presses. */
+  bool btn_diag;
+  bool btn_raw_seen;
+  uint32_t btn_raw;
+  uint32_t btn_zero;
 } cmd_audio_stats_t;
 
 /* STUN keepalive counters since boot (1.2.36, libpeer patch 0004):

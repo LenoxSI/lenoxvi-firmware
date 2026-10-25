@@ -273,6 +273,11 @@ static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd, uint8_t *out, size_t
 #define XVF_GPI_BUTTON_BIT        0
 #endif
 static volatile int s_dbg_btn = -1;
+#if LENOXVI_BOARD_ARRAY
+static volatile uint32_t s_btn_raw = 0;      /* last real GPI reply (1.2.45) */
+static volatile bool s_btn_raw_seen = false;
+static volatile uint32_t s_btn_zero = 0;     /* all-zero replies rejected */
+#endif
 extern "C" void pipecat_mute_hw_diag(int *btn) { *btn = s_dbg_btn; }
 
 /* ── Audio-loop health (1.2.27) ─────────────────────────────────────────
@@ -336,6 +341,17 @@ extern "C" void pipecat_audio_stats(cmd_audio_stats_t *out) {
   out->max_gap_us = s_au_max_gap_us;
   out->zero_s = s_au_zero_s;
   out->init = pipecat_audio_init_status();
+#if LENOXVI_BOARD_ARRAY
+  out->btn_diag = true;
+  out->btn_raw_seen = s_btn_raw_seen;
+  out->btn_raw = s_btn_raw;
+  out->btn_zero = s_btn_zero;
+#else
+  out->btn_diag = false;
+  out->btn_raw_seen = false;
+  out->btn_raw = 0;
+  out->btn_zero = 0;
+#endif
 #if !LENOXVI_BOARD_WAVESHARE
   out->dsp_total = s_dsp_total;
   out->dsp_ok = s_dsp_ok;
@@ -379,7 +395,12 @@ void pipecat_init_audio_capture() {
  * (only long holds were caught; live test 2026-10-16 18:50). Here a failed
  * read costs at most one 100 ms timeout, never sleep-retries. Busy/odd status = unknown, never a level.
  * Diag (get_info mute_hw.btn): 1/0 level, -1 bus error, -2 WAIT x5,
- * -100-N servicer status N. */
+ * -3 all-zero reply (1.2.45), -100-N servicer status N.
+ * All-zero replies: XVF_CTRL_DONE is 0x00, so a reply of nothing but zeros
+ * reads as "done, button pressed" — two in a row made a phantom press, and
+ * one between real reads broke a tap's debounce (live 2026-10-25: a press
+ * 5 s after a real tap, taps lost, the bit "pressed" at idle after boot).
+ * A real reply carries other GPI bits too, so all-zero = unknown. */
 static int xvf_button_read_conversation(void);
 static int xvf_button_read_once(void) {
     if (xvf3800 == NULL) return -1;
@@ -400,7 +421,14 @@ static int xvf_button_read_conversation(void) {
          * timed out (diag -1, 100%). */
         if (i2c_master_transmit_receive(xvf3800, req, sizeof(req), resp, sizeof(resp),
                                         pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS)) != ESP_OK) return -1;   /* bus error */
-        if (resp[0] == XVF_CTRL_DONE) return (resp[1] >> XVF_GPI_BUTTON_BIT) & 1;
+        if (resp[0] == XVF_CTRL_DONE) {
+            uint32_t raw = (uint32_t)resp[1] | ((uint32_t)resp[2] << 8)
+                         | ((uint32_t)resp[3] << 16) | ((uint32_t)resp[4] << 24);
+            if (raw == 0) { s_btn_zero = s_btn_zero + 1; return -3; }
+            s_btn_raw = raw;
+            s_btn_raw_seen = true;
+            return (resp[1] >> XVF_GPI_BUTTON_BIT) & 1;
+        }
         if (!XVF_STATUS_BUSY(resp[0])) return -100 - resp[0];   /* other status (diag) */
     }
     return -2;                    /* still WAIT after 5 asks */
