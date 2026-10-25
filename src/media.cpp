@@ -27,6 +27,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "main.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
@@ -132,6 +133,20 @@ static void update_is_playing(int16_t *buf, size_t n) {
  * still alive). The profile below is re-applied at EVERY boot, like the
  * ESPHome component and Kyzcreig's configure_xvf3800_dsp_profile(). */
 static i2c_master_dev_handle_t xvf3800 = NULL;
+/* XVF control-port lock (1.2.44). An XMOS read is a conversation: ask, the
+ * servicer answers WAIT, re-ask, get the value — several I2C transactions.
+ * Another task's write landing between the ask and the re-ask (the LED
+ * task, measured live: the 1.2.43 connect flash cost one boot readback read
+ * in two of three array boots) loses the pending read. So every write (with
+ * its retries) and every whole read conversation holds this lock. Created in
+ * the early I2C init before the handle exists; bounded wait, never forever. */
+static SemaphoreHandle_t s_xvf_lock = NULL;
+static StaticSemaphore_t s_xvf_lock_buf;
+#define XVF_LOCK_WAIT_MS 1000
+static bool xvf_lock(void) {
+    return s_xvf_lock != NULL && xSemaphoreTake(s_xvf_lock, pdMS_TO_TICKS(XVF_LOCK_WAIT_MS)) == pdTRUE;
+}
+static void xvf_unlock(void) { xSemaphoreGive(s_xvf_lock); }
 
 #define XVF_READ_BIT          0x80
 #define XVF_CTRL_DONE         0x00
@@ -177,6 +192,10 @@ static esp_err_t xvf_write_bytes(uint8_t resid, uint8_t cmd,
     uint8_t payload[32] = {resid, cmd, (uint8_t)value_len};
     if (value_len > 0) memcpy(&payload[3], value, value_len);
     esp_err_t ret = ESP_FAIL;
+    if (!xvf_lock()) {
+        ESP_LOGW(LOG_TAG, "XVF3800 write resid=%u cmd=%u: control port busy", resid, cmd);
+        return ESP_ERR_TIMEOUT;
+    }
     /* The servicer occasionally drops a transaction (one write in 14 failed
      * ESP_ERR_INVALID_STATE at boot). Retry a few times with a short gap. */
     for (int attempt = 0; attempt < 4; attempt++) {
@@ -185,6 +204,7 @@ static esp_err_t xvf_write_bytes(uint8_t resid, uint8_t cmd,
         if (ret == ESP_OK) break;
         vTaskDelay(pdMS_TO_TICKS(20));
     }
+    xvf_unlock();
     if (ret != ESP_OK)
         ESP_LOGW(LOG_TAG, "XVF3800 write resid=%u cmd=%u failed: %s",
                  resid, cmd, esp_err_to_name(ret));
@@ -360,8 +380,15 @@ void pipecat_init_audio_capture() {
  * read costs at most one 100 ms timeout, never sleep-retries. Busy/odd status = unknown, never a level.
  * Diag (get_info mute_hw.btn): 1/0 level, -1 bus error, -2 WAIT x5,
  * -100-N servicer status N. */
+static int xvf_button_read_conversation(void);
 static int xvf_button_read_once(void) {
     if (xvf3800 == NULL) return -1;
+    if (!xvf_lock()) return -1;
+    int r = xvf_button_read_conversation();
+    xvf_unlock();
+    return r;
+}
+static int xvf_button_read_conversation(void) {
     uint8_t req[3] = {XVF_RESID_IO_CONFIG, (uint8_t)(XVF_CMD_GPI_VALUE_ALL | XVF_READ_BIT), 4 + 1};
     uint8_t resp[5] = {0};
     /* The servicer usually answers WAIT to a fresh ask and has the value a
@@ -382,7 +409,10 @@ static int xvf_button_read_once(void) {
 static bool xvf_mute_pin_write_once(bool on) {
     if (xvf3800 == NULL) return false;
     uint8_t p[5] = {XVF_RESID_GPO, XVF_CMD_GPO_WRITE_VALUE, 2, XVF_GPO_MUTE_PIN, (uint8_t)(on ? 1 : 0)};
-    return i2c_master_transmit(xvf3800, p, sizeof(p), pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS)) == ESP_OK;
+    if (!xvf_lock()) return false;
+    bool ok = i2c_master_transmit(xvf3800, p, sizeof(p), pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS)) == ESP_OK;
+    xvf_unlock();
+    return ok;
 }
 
 #define MUTE_SETTLE_MS         500   /* short breather after the DSP profile */
@@ -482,17 +512,21 @@ static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd,
     if (xvf3800 == NULL) return ESP_ERR_INVALID_STATE;
     uint8_t req[3] = {resid, (uint8_t)(cmd | XVF_READ_BIT), (uint8_t)(out_len + 1)};
     uint8_t resp[36] = {0};
+    if (!xvf_lock()) return ESP_ERR_TIMEOUT;
+    esp_err_t result = ESP_ERR_TIMEOUT;
     for (int attempt = 0; attempt < 4; attempt++) {
         esp_err_t ret = i2c_master_transmit_receive(
             xvf3800, req, sizeof(req), resp, out_len + 1,
             pdMS_TO_TICKS(XVF_CONTROL_TIMEOUT_MS));
         if (ret != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
         if (XVF_STATUS_BUSY(resp[0])) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }  /* servicer busy */
-        if (resp[0] != XVF_CTRL_DONE) return ESP_ERR_INVALID_RESPONSE;
+        if (resp[0] != XVF_CTRL_DONE) { result = ESP_ERR_INVALID_RESPONSE; break; }
         memcpy(out, &resp[1], out_len);
-        return ESP_OK;
+        result = ESP_OK;
+        break;
     }
-    return ESP_ERR_TIMEOUT;
+    xvf_unlock();
+    return result;
 }
 
 static esp_err_t xvf_read_int32(uint8_t resid, uint8_t cmd, int32_t *value) {
@@ -562,7 +596,7 @@ static void configure_xvf3800_dsp_profile() {
     float agc_gain = -1.0f;
     if (xvf_read_float(XVF_RESID_PP, XVF_CMD_PP_AGCGAIN, &agc_gain) == ESP_OK)
         ESP_LOGI(LOG_TAG, "XVF3800 readback: AGC_GAIN=%.3f", (double)agc_gain);
-    float mic_gain = -1.0f;
+    float mic_gain = NAN;   /* NAN = read failed -> get_info "mic_gain": null */
     if (xvf_read_float(XVF_RESID_AUDIO_MGR, XVF_CMD_AUDIO_MGR_MIC_GAIN, &mic_gain) == ESP_OK)
         ESP_LOGI(LOG_TAG, "XVF3800 readback: MIC_GAIN=%.1f", (double)mic_gain);
     uint8_t ver[3] = {0, 0, 0};
@@ -614,6 +648,7 @@ void pipecat_init_i2c_early() {
     xvf_dev.dev_addr_length = I2C_ADDR_BIT_LEN_7;
     xvf_dev.device_address  = XVF3800_ADDR;
     xvf_dev.scl_speed_hz    = 100000;  /* IDF 5.3: required or add_device fails */
+    if (s_xvf_lock == NULL) s_xvf_lock = xSemaphoreCreateMutexStatic(&s_xvf_lock_buf);
     if (i2c_master_bus_add_device(i2c_bus, &xvf_dev, &xvf3800) == ESP_OK) {
         /* The XMOS I2C servicer NACKs for the first seconds after power-up
          * (observed: probe at t+7.5s failed, bus scan found 0x2c at t+8.4s).
