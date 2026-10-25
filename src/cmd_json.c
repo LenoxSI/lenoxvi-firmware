@@ -129,6 +129,33 @@ char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
         return NULL;
       }
     }
+    if (audio->dsp_total) {
+      cJSON *ds = cJSON_AddObjectToObject(au, "dsp");
+      bool ok = ds
+          && cJSON_AddNumberToObject(ds, "ok", audio->dsp_ok)
+          && cJSON_AddNumberToObject(ds, "total", audio->dsp_total)
+          && cJSON_AddNumberToObject(ds, "rb", audio->dsp_rb);
+      if (ok) {
+        float g = audio->dsp_mic_gain;
+        ok = (g == g && g > -1e6f && g < 1e6f)  /* finite: 0.1 resolution */
+            ? cJSON_AddNumberToObject(ds, "mic_gain", (double)(long)(g * 10.0f + (g < 0 ? -0.5f : 0.5f)) / 10.0) != NULL
+            : cJSON_AddNullToObject(ds, "mic_gain") != NULL;
+      }
+      if (ok) {
+        const uint8_t *v = audio->dsp_ver;
+        if (v[0] || v[1] || v[2]) {
+          char ver[12];
+          snprintf(ver, sizeof(ver), "%u.%u.%u", v[0], v[1], v[2]);
+          ok = cJSON_AddStringToObject(ds, "ver", ver) != NULL;
+        } else {
+          ok = cJSON_AddNullToObject(ds, "ver") != NULL;
+        }
+      }
+      if (!ok) {
+        cJSON_Delete(root);
+        return NULL;
+      }
+    }
   }
   if (boot) {
     char safe_reason[16], safe_why[24];

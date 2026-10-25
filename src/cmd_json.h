@@ -39,6 +39,15 @@ typedef struct cmd_audio_stats_t {
   uint32_t max_gap_us;   /* worst gap between frame reads, since last read */
   uint32_t zero_s;       /* seconds of all-zero mic audio while not muted, since boot */
   const char *init;      /* audio init result: "ok" or the step that failed; NULL = omitted */
+  /* XVF3800 boot DSP profile (1.2.42): writes attempted/accepted, how many
+   * written values read back identical, MIC_GAIN as read back (NAN = read
+   * failed) and the XMOS firmware version (0.0.0 = read failed).
+   * dsp_total 0 = profile never ran -> "dsp" omitted. */
+  uint8_t dsp_total;
+  uint8_t dsp_ok;
+  uint8_t dsp_rb;
+  float dsp_mic_gain;
+  uint8_t dsp_ver[3];
 } cmd_audio_stats_t;
 
 /* STUN keepalive counters since boot (1.2.36, libpeer patch 0004):

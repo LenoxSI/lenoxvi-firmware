@@ -19,6 +19,7 @@
 
 #include <opus.h>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 
 #include "driver/i2c_master.h"
@@ -271,6 +272,14 @@ static volatile uint32_t s_au_max_gap_us = 0;
  * keeps running; this makes that visible in get_info without serial. */
 static volatile uint32_t s_au_zero_s = 0;
 static volatile int s_au_core = -1;
+#if !LENOXVI_BOARD_WAVESHARE
+/* DSP profile evidence for get_info (1.2.42): the flex runs a different XMOS
+ * image than the one this command map was written for, so every write is
+ * read back and counted where the dashboard can see it. */
+static uint8_t s_dsp_total, s_dsp_ok, s_dsp_rb;
+static float s_dsp_mic_gain = NAN;
+static uint8_t s_dsp_ver[3];
+#endif
 
 #if !LENOXVI_BOARD_WAVESHARE  /* waveshare: no I2S channel here to hook (ovf stays 0) */
 static bool on_mic_queue_overflow(i2s_chan_handle_t, i2s_event_data_t *, void *) {
@@ -307,6 +316,15 @@ extern "C" void pipecat_audio_stats(cmd_audio_stats_t *out) {
   out->max_gap_us = s_au_max_gap_us;
   out->zero_s = s_au_zero_s;
   out->init = pipecat_audio_init_status();
+#if !LENOXVI_BOARD_WAVESHARE
+  out->dsp_total = s_dsp_total;
+  out->dsp_ok = s_dsp_ok;
+  out->dsp_rb = s_dsp_rb;
+  out->dsp_mic_gain = s_dsp_mic_gain;
+  memcpy(out->dsp_ver, s_dsp_ver, 3);
+#else
+  out->dsp_total = 0;
+#endif
   s_au_max_work_us = 0;      /* worst cases are per read window */
   s_au_max_gap_us = 0;
 }
@@ -477,6 +495,13 @@ static esp_err_t xvf_read_bytes(uint8_t resid, uint8_t cmd,
     return ESP_ERR_TIMEOUT;
 }
 
+static esp_err_t xvf_read_int32(uint8_t resid, uint8_t cmd, int32_t *value) {
+    uint32_t bits;
+    esp_err_t ret = xvf_read_bytes(resid, cmd, (uint8_t *)&bits, 4);
+    if (ret == ESP_OK) memcpy(value, &bits, 4);
+    return ret;
+}
+
 static esp_err_t xvf_read_float(uint8_t resid, uint8_t cmd, float *value) {
     uint32_t bits;
     esp_err_t ret = xvf_read_bytes(resid, cmd, (uint8_t *)&bits, 4);
@@ -544,8 +569,26 @@ static void configure_xvf3800_dsp_profile() {
     if (xvf_read_version(ver) == ESP_OK)
         ESP_LOGI(LOG_TAG, "XVF3800 readback: firmware v%u.%u.%u", ver[0], ver[1], ver[2]);
 
-    ESP_LOGI(LOG_TAG, "XVF3800 DSP profile applied: %lu/%lu writes ok",
-             (unsigned long)ok, (unsigned long)total);
+    /* Read every written value back: identical values mean the command IDs
+     * hold on this image (a wrong map would land on another register). */
+    uint32_t rb = 0;
+    float f;
+    int32_t i;
+    if (mic_gain == 55.0f) rb++;
+    if (xvf_read_float(XVF_RESID_PP, XVF_CMD_PP_AGCDESIREDLEVEL, &f) == ESP_OK && f == 0.005f) rb++;
+    if (xvf_read_float(XVF_RESID_PP, XVF_CMD_PP_AGCMAXGAIN, &f) == ESP_OK && f == 64.0f) rb++;
+    if (xvf_read_int32(XVF_RESID_PP, XVF_CMD_PP_AGCONOFF, &i) == ESP_OK && i == 1) rb++;
+    if (xvf_read_int32(XVF_RESID_PP, XVF_CMD_PP_LIMITONOFF, &i) == ESP_OK && i == 1) rb++;
+    if (xvf_read_int32(XVF_RESID_PP, XVF_CMD_PP_ECHOONOFF, &i) == ESP_OK && i == 0) rb++;
+    if (xvf_read_int32(XVF_RESID_PP, XVF_CMD_PP_NLATTENONOFF, &i) == ESP_OK && i == 0) rb++;
+
+    s_dsp_total = (uint8_t)total;
+    s_dsp_ok = (uint8_t)ok;
+    s_dsp_rb = (uint8_t)rb;
+    s_dsp_mic_gain = mic_gain;
+    memcpy(s_dsp_ver, ver, 3);
+    ESP_LOGI(LOG_TAG, "XVF3800 DSP profile applied: %lu/%lu writes ok, %lu/%lu read back identical",
+             (unsigned long)ok, (unsigned long)total, (unsigned long)rb, (unsigned long)total);
 }
 
 /* ── Hardware init ──────────────────────────────────────────────────────── */
