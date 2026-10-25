@@ -1,5 +1,5 @@
 set(COMMON_SRC "webrtc.cpp" "main.cpp" "http.cpp")
-set(SRC_REQUIRES driver esp_wifi nvs_flash peer esp_psram esp-libopus esp_http_client json app_update esp_timer)
+set(SRC_REQUIRES driver esp_wifi nvs_flash peer esp_psram esp-libopus esp_http_client json app_update esp_timer esp_driver_usb_serial_jtag)
 # Waveshare line: audio comes from the board component (set by the root
 # CMakeLists as a build property — BOARD itself isn't visible here).
 idf_build_get_property(lenoxvi_board LENOXVI_BOARD)
@@ -13,7 +13,7 @@ if(IDF_TARGET STREQUAL linux)
 		REQUIRES peer esp-libopus esp_http_client json)
 else()
 	idf_component_register(
-		SRCS ${COMMON_SRC} "wifi.cpp" "media.cpp" "rtvi.cpp" "rtvi_callbacks.cpp" "rgb.c" "ota.cpp" "settings.cpp" "cmd.cpp" "cmd_json.c" "wifi_trial.c" "boot_diag.c"
+		SRCS ${COMMON_SRC} "wifi.cpp" "media.cpp" "rtvi.cpp" "rtvi_callbacks.cpp" "rgb.c" "ota.cpp" "settings.cpp" "cmd.cpp" "cmd_json.c" "wifi_trial.c" "boot_diag.c" "usb_proto.c" "link_state.c" "usb_cmd.c"
 		REQUIRES ${SRC_REQUIRES})
 endif()
 

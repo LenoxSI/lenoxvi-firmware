@@ -14,6 +14,7 @@
 #include "rgb.h"
 #include "settings.h"
 #include "cmd.h"
+#include "link_state.h"
 
 static bool g_wifi_connected = false;
 static bool g_webrtc_started = false;
@@ -174,6 +175,7 @@ static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
       s_trial_authfails = wifi_reason_is_auth_fail(d->reason) ? s_trial_authfails + 1 : 0;
     }
     rgb_set_state(RGB_STATE_WIFI_CONNECTING);
+    link_state_set(LINK_WIFI_CONNECTING);
     /* 023 fix (2026-09-29): the old 5-strike counter gave up for the
      * whole boot after a ~30s body-block — infinite retries with
      * backoff instead; only a got-ip resets the backoff. */
@@ -195,6 +197,7 @@ static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
     s_trial_authfails = 0;  // the network took the credentials
     if (s_reconnect_timer) esp_timer_stop(s_reconnect_timer);  // no stale retry
     rgb_set_state(RGB_STATE_WIFI_UP);
+    link_state_set(LINK_WIFI_UP);
     // OTA check does NOT run here (empirical bisect 2026-09-19): the same
     // version GET that works at CONNECTED (build 47: 200 OK, update found)
     // crashes deterministically at got-ip time. It runs from the CONNECTED
@@ -245,6 +248,7 @@ void pipecat_init_wifi() {
   ESP_ERROR_CHECK(esp_wifi_set_config(
       static_cast<wifi_interface_t>(ESP_IF_WIFI_STA), &wifi_config));
   rgb_set_state(RGB_STATE_WIFI_CONNECTING);
+  link_state_set(LINK_WIFI_CONNECTING);
   ESP_ERROR_CHECK(esp_wifi_connect());
 
   // block until we get an IP address

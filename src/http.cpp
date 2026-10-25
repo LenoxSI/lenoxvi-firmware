@@ -80,7 +80,11 @@ void pipecat_http_request(char *offer, char *answer) {
   esp_http_client_config_t config;
   memset(&config, 0, sizeof(esp_http_client_config_t));
 
-  config.url = PIPECAT_SMALLWEBRTC_URL;
+#ifdef LINUX_BUILD
+  config.url = PIPECAT_SMALLWEBRTC_URL;   /* the linux build has no settings.cpp */
+#else
+  config.url = settings_get_bot_url();     /* saved host address, else the bake (1.2.47) */
+#endif
   config.event_handler = http_event_handler;
   config.timeout_ms = HTTP_TIMEOUT_MS;
   config.user_data = answer;

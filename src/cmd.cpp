@@ -94,7 +94,8 @@ void cmd_send_simple(const char *cmd, bool ok, const char *note) {
  * second write straight after the first could re-create a task on a TCB
  * the kernel still had on its lists.) */
 typedef struct {
-  int kind;  /* 0 = set_name, 1 = set_wifi (starts a trial), 2 = save the mute state */
+  int kind;  /* NVS_JOB_* (cmd.h): 0 = set_name, 1 = set_wifi (starts a trial),
+              * 2 = save the mute state, 3 = host address, 4 = Wi-Fi over USB (no trial) */
   const char *a, *b;
   int rc;
 } nvs_job_t;
@@ -107,18 +108,21 @@ static TaskHandle_t s_job_worker;
 static void nvs_job_task(void *arg) {
   (void)arg;
   while (1) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  /* nvs_run posts a job */
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  /* pipecat_nvs_run posts a job */
     /* Mute saves the state as it is NOW, not as it was when the job was
      * posted: a button press in between must not be overwritten by the
      * older value. */
-    s_job.rc = s_job.kind == 0 ? settings_set_node_name(s_job.a)
-             : s_job.kind == 1 ? settings_begin_wifi_trial(s_job.a, s_job.b)
-                               : settings_set_muted(pipecat_mic_muted());
+    s_job.rc = s_job.kind == NVS_JOB_NAME        ? settings_set_node_name(s_job.a)
+             : s_job.kind == NVS_JOB_WIFI_TRIAL  ? settings_begin_wifi_trial(s_job.a, s_job.b)
+             : s_job.kind == NVS_JOB_MUTE        ? settings_set_muted(pipecat_mic_muted())
+             : s_job.kind == NVS_JOB_BOT_URL     ? settings_set_bot_url(s_job.a)
+             : s_job.kind == NVS_JOB_WIFI_DIRECT ? settings_set_wifi_direct(s_job.a, s_job.b)
+                                                 : -1;
     xSemaphoreGive(s_job_done);
   }
 }
 
-static int nvs_run(int kind, const char *a, const char *b) {
+extern "C" int pipecat_nvs_run(int kind, const char *a, const char *b) {
   /* A plain static array is internal DRAM — it must stay that way (never
    * PSRAM), or the write double-faults exactly as on the RTVI stack. */
   static StaticTask_t buf;
@@ -364,7 +368,7 @@ static bool cmd_dispatch(const cJSON *msg) {
      * set_name crash; repeated by the first 1.2.11 build, 2026-10-16). The
      * mute itself already applied above; a failed save only costs
      * persistence, and says so in the log. */
-    if (nvs_run(2, NULL, NULL) != 0) {
+    if (pipecat_nvs_run(NVS_JOB_MUTE, NULL, NULL) != 0) {
       ESP_LOGW(TAG, "set_mute: applied but NOT saved (nvs error)");
     }
     char reply[160];
@@ -379,7 +383,7 @@ static bool cmd_dispatch(const cJSON *msg) {
     if (!cJSON_IsString(j_name)) {
       cmd_send_simple("set_name", false, "missing name");
     } else {
-      int rc = nvs_run(0, j_name->valuestring, NULL);
+      int rc = pipecat_nvs_run(NVS_JOB_NAME, j_name->valuestring, NULL);
       if (rc == 0) {
         /* Echo the stored name: the bot's registry relabels the room
          * from THIS ack (immediately, no reboot needed). Plain "ok"
@@ -422,7 +426,7 @@ static bool cmd_dispatch(const cJSON *msg) {
       /* Checked before the NVS write: storing a trial and then refusing to
        * reboot would leave it armed for whatever boot comes next. */
       cmd_send_simple("set_wifi", false, "ota in progress");
-    } else if (nvs_run(1, j_ssid->valuestring, j_pass->valuestring) != 0) {
+    } else if (pipecat_nvs_run(NVS_JOB_WIFI_TRIAL, j_ssid->valuestring, j_pass->valuestring) != 0) {
       cmd_send_simple("set_wifi", false, "nvs error");
     } else {
       cmd_send_simple("set_wifi", true, "stored, rebooting to verify");

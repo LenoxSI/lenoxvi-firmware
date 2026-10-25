@@ -10,6 +10,7 @@
 #ifndef LINUX_BUILD
 #include "nvs_flash.h"
 #include "rgb.h"
+#include "usb_cmd.h"
 
 extern "C" void app_main(void) {
   boot_diag_init();  /* 1.2.29: capture why the previous boot ended */
@@ -29,6 +30,10 @@ extern "C" void app_main(void) {
    * main task, internal-RAM stack, so the NVS write is safe. */
   settings_wifi_trial_boot();
   pipecat_mic_mute_init();  /* H4: a muted node boots muted */
+  /* USB setup listener (1.2.47): before the XVF probe (~8 s of NACKs after
+   * power-up) and long before pipecat_init_wifi(), which blocks forever on
+   * a bad network. A node stuck there still answers the Node setup page. */
+  usb_cmd_start();
   /* Hostname follows the node name (UniFi shows it); sta netif exists
    * after esp_netif_init inside pipecat_init_wifi — set it from the
    * got-ip path instead (esp_netif_set_hostname on the default sta). */

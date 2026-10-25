@@ -2,6 +2,7 @@
 #include "cmd_json.h"
 #include "boot_diag.h"
 #include "rgb.h"
+#include "settings.h"
 
 #ifndef LINUX_BUILD
 
@@ -102,7 +103,7 @@ static int compare_versions(const char *local, const char *remote) {
 #define FW_URL_FMT "%.*s/firmware/" XVF_OTA_TRACK "/%s"
 
 static void build_firmware_url(char *out, size_t out_len, const char *suffix) {
-    const char *base = PIPECAT_SMALLWEBRTC_URL;
+    const char *base = settings_get_bot_url();   /* OTA follows the host address (1.2.47) */
     const char *api_off = strstr(base, "/api/offer");
     size_t prefix_len = api_off ? (size_t)(api_off - base) : strlen(base);
     if (prefix_len >= out_len) prefix_len = out_len - 1;
@@ -152,6 +153,9 @@ static volatile bool s_ota_in_flight = false;
 static volatile bool s_drop_deferred = false;
 
 bool pipecat_ota_busy(void) { return s_ota_in_flight; }
+/* The same flag for C callers (usb_cmd.c): main.h declares pipecat_ota_busy
+ * with C++ linkage. */
+extern "C" bool pipecat_ota_busy_c(void) { return s_ota_in_flight; }
 
 /* Last OTA outcome this boot, for get_info: every failure used to be
  * serial-only, so a node that refused or failed an update just sat there.

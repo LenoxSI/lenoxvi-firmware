@@ -27,6 +27,13 @@ void cmd_send_simple(const char *cmd, bool ok, const char *note);
 void cmd_push_firmware_version(void);
 void cmd_service_mute_push(void);   /* H4: send a pending button mute change */
 
+/* The NVS worker (1.2.47: exported for the USB setup listener). Runs one
+ * NVS write on an internal-RAM stack and waits for it; a and b must stay
+ * valid until it returns. 0 = ok. */
+enum { NVS_JOB_NAME = 0, NVS_JOB_WIFI_TRIAL = 1, NVS_JOB_MUTE = 2,
+       NVS_JOB_BOT_URL = 3, NVS_JOB_WIFI_DIRECT = 4 };
+int pipecat_nvs_run(int kind, const char *a, const char *b);
+
 #if LENOXVI_BOARD_WAVESHARE
 /* Board-only commands (set_speaker), tried before "unknown cmd" via the
  * LENOXVI_CMD_BOARD_EXT hook. Returns true when it handled (and answered). */

@@ -15,6 +15,7 @@ extern "C" {
 #define NODE_NAME_MAX 32
 #define WIFI_SSID_MAX 33
 #define WIFI_PASS_MAX 65  /* 64-char raw PSK + NUL (1.2.35; 64 held only 63) */
+#define BOT_URL_MAX 128   /* incl. NUL; the largest stored string (1.2.47) */
 
 /* Load the node's settings at boot. Safe before nvs_flash_init() —
  * app_main initializes NVS first, then calls this. Returns true when a
@@ -54,6 +55,18 @@ int settings_set_muted(bool muted);
  * "Living_Room" -> "living-room". Used for esp_netif_set_hostname() so the
  * router's client list shows the name. "" if nothing valid is left. */
 const char *settings_hostname(void);
+
+/* Host address (1.2.47): the saved bot_url, else the baked
+ * PIPECAT_SMALLWEBRTC_URL. Saved = set over USB from the Node setup page. */
+const char *settings_get_bot_url(void);
+bool settings_bot_url_saved(void);
+/* "" clears (back to the baked URL). Internal-RAM stack only (pipecat_nvs_run). */
+int settings_set_bot_url(const char *url);
+/* USB Wi-Fi change: NO trial. Writes ssid/pass and erases any pending trial
+ * and previous creds in ONE commit (the person is at the device; a trial
+ * would roll back to a network that may no longer exist). Internal-RAM
+ * stack only (pipecat_nvs_run). */
+int settings_set_wifi_direct(const char *ssid, const char *password);
 
 #ifdef __cplusplus
 }

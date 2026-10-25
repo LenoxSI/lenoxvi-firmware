@@ -21,6 +21,7 @@
 #include <freertos/semphr.h>
 #include "wifi_trial.h"
 #include "nvs_str.h"
+#include "usb_proto.h"
 
 static const char *TAG = "settings";
 
@@ -33,10 +34,13 @@ static const char *TAG = "settings";
 #define KEY_PREV_SSID "wifi_pssid"
 #define KEY_PREV_PASS "wifi_ppass"
 #define KEY_TRIAL "wifi_trial"
+/* 1.2.47: host address set over USB — see settings_get_bot_url */
+#define KEY_BOT_URL "bot_url"
 
 static char g_node_name[NODE_NAME_MAX] = "";
 static char g_wifi_ssid[WIFI_SSID_MAX] = "";
 static char g_wifi_pass[WIFI_PASS_MAX] = "";
+static char g_bot_url[BOT_URL_MAX] = "";
 static bool g_muted = false;
 /* set_mute (nvs_write task) and the array's button (mute task) both save
  * the mute state; one at a time, so the check and the write can't
@@ -54,12 +58,12 @@ static char g_hostname[NODE_NAME_MAX] = "";
  * double-faults the core (2026-09-29 set_name; again 2026-10-16 with the
  * first 1.2.11 set_mute). Every setter checks first and REFUSES with an
  * error instead of crashing the node — route writes through cmd.cpp's
- * nvs_run (internal-RAM stack). */
+ * pipecat_nvs_run (internal-RAM stack). */
 static bool stack_in_psram(const char *what) {
   int probe = 0;
   if (esp_ptr_external_ram(&probe)) {
     ESP_LOGE(TAG, "%s: refused — called on a PSRAM stack (would crash the "
-             "node); route the write through nvs_run", what);
+             "node); route the write through pipecat_nvs_run", what);
     return true;
   }
   return false;
@@ -70,7 +74,11 @@ static bool stack_in_psram(const char *what) {
  * nvs_str.h (values that exactly filled their buffer used to be dropped). */
 static void nvs_read_str(nvs_handle_t h, const char *key, char *dst,
                          size_t dst_size) {
-  char tmp[WIFI_PASS_MAX > NODE_NAME_MAX ? WIFI_PASS_MAX : NODE_NAME_MAX];
+  /* Sized for the largest stored string: a smaller tmp silently drops every
+   * longer saved value (nvs_get_str fails), e.g. a host address over 64. */
+  static_assert(BOT_URL_MAX >= WIFI_PASS_MAX && BOT_URL_MAX >= NODE_NAME_MAX,
+                "tmp holds every stored string");
+  char tmp[BOT_URL_MAX];
   size_t len = sizeof(tmp);
   if (nvs_get_str(h, key, tmp, &len) == ESP_OK) {
     nvs_str_copy(dst, dst_size, tmp, len);
@@ -123,6 +131,7 @@ bool settings_load(void) {
     nvs_read_str(h, KEY_NAME, g_node_name, sizeof(g_node_name));
     nvs_read_str(h, KEY_SSID, g_wifi_ssid, sizeof(g_wifi_ssid));
     nvs_read_str(h, KEY_PASS, g_wifi_pass, sizeof(g_wifi_pass));
+    nvs_read_str(h, KEY_BOT_URL, g_bot_url, sizeof(g_bot_url));
     uint8_t m = 0;
     if (nvs_get_u8(h, KEY_MUTED, &m) == ESP_OK) g_muted = (m != 0);
     nvs_close(h);
@@ -172,6 +181,35 @@ int settings_set_muted(bool muted) {
 const char *settings_get_node_name(void) { return g_node_name; }
 const char *settings_get_wifi_ssid(void) { return g_wifi_ssid; }
 const char *settings_get_wifi_pass(void) { return g_wifi_pass; }
+
+/* ── Host address (1.2.47) ─────────────────────────────────────────── */
+/* Nothing saved = exactly the baked URL, so such a node reaches the same
+ * offer and OTA URLs as 1.2.46. */
+const char *settings_get_bot_url(void) {
+  return g_bot_url[0] ? g_bot_url : PIPECAT_SMALLWEBRTC_URL;
+}
+bool settings_bot_url_saved(void) { return g_bot_url[0] != '\0'; }
+
+int settings_set_bot_url(const char *url) {
+  if (stack_in_psram("set_bot_url")) return -ESP_ERR_INVALID_STATE;
+  if (!url || !usb_proto_bot_url_ok(url)) return -1;
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+  if (err != ESP_OK) return err;
+  if (url[0] == '\0') {
+    err = nvs_erase_key(h, KEY_BOT_URL);
+    if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+  } else {
+    err = nvs_set_str(h, KEY_BOT_URL, url);
+  }
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  if (err == ESP_OK) {
+    strlcpy(g_bot_url, url, sizeof(g_bot_url));
+    ESP_LOGI(TAG, "host address %s", url[0] ? "saved" : "cleared (built-in again)");
+  }
+  return err;
+}
 
 /* DHCP/DNS hostnames allow only a-z, 0-9 and '-' (RFC 1123), no leading or
  * trailing '-', at most 63 characters. Node names may hold '_' or capitals,
@@ -286,6 +324,41 @@ int settings_wifi_trial_passed(void) {
   if (err == ESP_OK) {
     g_wifi_trial_pending = false;
     ESP_LOGI(TAG, "wifi trial PASSED: the bot answered on the new network");
+  }
+  return err;
+}
+
+/* USB Wi-Fi change (1.2.47): no trial — the person is at the device. Any
+ * pending trial and previous creds go in the same commit, so a later boot
+ * can't roll back to a network that may no longer exist. */
+static esp_err_t erase_if_present(nvs_handle_t h, const char *key) {
+  esp_err_t err = nvs_erase_key(h, key);
+  return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+}
+
+int settings_set_wifi_direct(const char *ssid, const char *password) {
+  if (stack_in_psram("set_wifi_direct")) return -ESP_ERR_INVALID_STATE;
+  if (!ssid || !password) return -1;
+  size_t n = strlen(ssid);
+  if (n < 1 || n > WIFI_SSID_MAX - 1) return -1;
+  if (!wifi_pass_acceptable(password)) return -1;   /* 65+ chars, or 64 non-hex */
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+  if (err != ESP_OK) return err;
+  err = nvs_set_str(h, KEY_SSID, ssid);
+  if (err == ESP_OK) err = nvs_set_str(h, KEY_PASS, password);
+  if (err == ESP_OK) err = erase_if_present(h, KEY_TRIAL);
+  if (err == ESP_OK) err = erase_if_present(h, KEY_PREV_SSID);
+  if (err == ESP_OK) err = erase_if_present(h, KEY_PREV_PASS);
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  if (err == ESP_OK) {
+    strlcpy(g_wifi_ssid, ssid, sizeof(g_wifi_ssid));
+    strlcpy(g_wifi_pass, password, sizeof(g_wifi_pass));
+    /* No trial is pending any more: keep this boot's trial watcher from
+     * acting on the one we just erased. */
+    g_wifi_trial_pending = false;
+    ESP_LOGI(TAG, "Wi-Fi set over USB (no trial)");
   }
   return err;
 }
