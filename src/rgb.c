@@ -29,8 +29,13 @@ static const char *TAG = "rgb";
 /* State → XMOS effect mapping (colors chosen to match the old ring semantics):
  *   BOOT            → breathing, blue      (power-up)
  *   WIFI_CONNECTING → breathing, amber
- *   WIFI_UP         → solid dim amber
- *   BRIDGE_CONNECTED→ off                  (dark when idle — dark-room rule)
+ *   WIFI_UP         → breathing dim amber  (Wi-Fi up, bot not answering yet:
+ *                                           breathes so it can't read as a
+ *                                           steady "ready" light)
+ *   BRIDGE_CONNECTED→ off                  (dark when idle — dark-room rule),
+ *                     after one 1.5 s solid green flash when a session
+ *                     first connects (rgb_flash_connected), so a room
+ *                     visibly confirms it reached the bot
  *   LISTENING       → solid, purple        (wake word accepted)
  *   PROCESSING      → breathing, cyan      (STT/LLM work)
  *   SPEAKING        → solid, cyan          (TTS out the Sonos)
@@ -82,7 +87,7 @@ static esp_err_t led_set_color(uint32_t rgb) {
 static const led_effect_t *effect_for(rgb_state_t s) {
     static const led_effect_t EFF_BOOT       = {1, 255, 0x0000FF};
     static const led_effect_t EFF_WIFI_CONN  = {1, 255, 0xFF9E00};
-    static const led_effect_t EFF_WIFI_UP    = {3,  40, 0xFF9E00};
+    static const led_effect_t EFF_WIFI_UP    = {1,  40, 0xFF9E00};
     static const led_effect_t EFF_BRIDGE     = {0,   0, 0x000000};
     static const led_effect_t EFF_LISTENING  = {3, 255, 0x800080};
     static const led_effect_t EFF_PROCESSING = {1, 255, 0x00FFFF};
@@ -106,7 +111,36 @@ static const led_effect_t *effect_for(rgb_state_t s) {
 
 // ── Shared state ──────────────────────────────────────────────
 static volatile rgb_state_t current_state = RGB_STATE_BOOT;
-static volatile rgb_state_t rendered_state = RGB_STATE_DARK;
+static const led_effect_t *rendered_eff = NULL;   /* render task only */
+
+/* Connect flash: armed by rgb_flash_connected(), timed from the moment the
+ * render task first shows it (the array's I2C bus may not be ready at
+ * connect), shown only while the state is still BRIDGE_CONNECTED. Session
+ * activity (wake, speech, dark) cancels it; the Wi-Fi states don't, because
+ * the render task can read the pre-connect state just after it was armed. */
+#define CONNECT_FLASH_MS 1500
+static const led_effect_t EFF_CONNECT_FLASH = {3, 120, 0x00FF00};
+static volatile bool s_flash_pending = false;
+static bool s_flash_live = false;                 /* render task only */
+static TickType_t s_flash_until = 0;              /* render task only */
+
+static const led_effect_t *render_effect(rgb_state_t s) {
+    if (s == RGB_STATE_BRIDGE_CONNECTED) {
+        TickType_t now = xTaskGetTickCount();
+        if (s_flash_pending) {
+            s_flash_pending = false;
+            s_flash_live = true;
+            s_flash_until = now + pdMS_TO_TICKS(CONNECT_FLASH_MS);
+        }
+        if (s_flash_live && (int32_t)(s_flash_until - now) > 0) return &EFF_CONNECT_FLASH;
+        s_flash_live = false;
+    } else {
+        s_flash_live = false;
+        if (s == RGB_STATE_DARK || (s >= RGB_STATE_LISTENING && s <= RGB_STATE_SPEAKING))
+            s_flash_pending = false;
+    }
+    return effect_for(s);
+}
 
 #if !LENOXVI_BOARD_WAVESHARE  /* waveshare: its own render task below (no XVF bus) */
 // ── Render task ──────────────────────────────────────────────
@@ -124,13 +158,13 @@ static void rgb_task(void *arg) {
                 vTaskDelay(pdMS_TO_TICKS(100));
                 continue;
             }
-            rendered_state = RGB_STATE_DARK;  /* force re-render of current */
+            rendered_eff = NULL;  /* force re-render of current */
             bus_ready_flushed = true;
         }
         rgb_state_t s = current_state;
+        const led_effect_t *eff = render_effect(s);
 
-        if (s != rendered_state) {
-            const led_effect_t *eff = effect_for(s);
+        if (eff != rendered_eff) {
             /* Push all three registers; effect order matters (color/bright first
              * so an effect change applies with them in place). */
             esp_err_t r1 = led_set_color(eff->color);
@@ -142,7 +176,7 @@ static void rgb_task(void *arg) {
                 vTaskDelay(pdMS_TO_TICKS(500));  /* retry next tick */
                 continue;
             }
-            rendered_state = s;
+            rendered_eff = eff;
             ESP_LOGI(TAG, "LED state -> %d (effect=%u bright=%u)", (int)s,
                      (unsigned)eff->effect, (unsigned)eff->brightness);
         }
@@ -170,7 +204,7 @@ void rgb_init(void) {
      * as the XMOS is ready — same probe-with-retry pattern as the DSP profile.
      */
     current_state = RGB_STATE_BOOT;
-    rendered_state = RGB_STATE_DARK;
+    rendered_eff = NULL;
     BaseType_t ok = xTaskCreate(rgb_task, "rgb", 4096, NULL, 4, NULL);
     if (ok != pdPASS) ESP_LOGE(TAG, "rgb task spawn failed");
 #endif
@@ -185,11 +219,11 @@ static void rgb_task(void *arg) {
     for (;;) {
         board_led_set_muted(pipecat_mic_muted_c());
         rgb_state_t s = current_state;
+        const led_effect_t *eff = render_effect(s);
 
-        if (s != rendered_state) {
-            const led_effect_t *eff = effect_for(s);
+        if (eff != rendered_eff) {
             board_led_set(eff->effect, eff->brightness, eff->color);
-            rendered_state = s;
+            rendered_eff = eff;
             ESP_LOGI(TAG, "LED state -> %d (effect=%u bright=%u)", (int)s,
                      (unsigned)eff->effect, (unsigned)eff->brightness);
         }
@@ -204,7 +238,7 @@ void rgb_init(void) {
     /* Fails soft: on error board_led_* are no-ops and the task just tracks state. */
     board_led_init();
     current_state = RGB_STATE_BOOT;
-    rendered_state = RGB_STATE_DARK;
+    rendered_eff = NULL;
     BaseType_t ok = xTaskCreate(rgb_task, "rgb", 4096, NULL, 4, NULL);
     if (ok != pdPASS) ESP_LOGE(TAG, "rgb task spawn failed");
 }
@@ -228,4 +262,8 @@ void rgb_set_state(rgb_state_t new_state) {
 
 rgb_state_t rgb_get_state(void) {
     return current_state;
+}
+
+void rgb_flash_connected(void) {
+    s_flash_pending = true;
 }

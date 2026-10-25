@@ -190,6 +190,7 @@ static void pipecat_onconnectionstatechange_task(PeerConnectionState state,
     pipecat_session_over("peer-dropped");
   } else if (state == PEER_CONNECTION_CONNECTED) {
    rgb_set_state(RGB_STATE_BRIDGE_CONNECTED);
+   rgb_flash_connected();               // one green blink: this room reached the bot
    connected_at = xTaskGetTickCount();  // arm the DC watchdog
  #ifndef LINUX_BUILD
     // Audio init deferred to here: I2S DMA allocations fragment internal RAM,

@@ -44,6 +44,12 @@ void rgb_set_state(rgb_state_t new_state);
  */
 rgb_state_t rgb_get_state(void);
 
+/**
+ * One short green flash when a session reaches the bot, then the usual
+ * dark idle. Call right AFTER rgb_set_state(RGB_STATE_BRIDGE_CONNECTED).
+ */
+void rgb_flash_connected(void);
+
 #ifdef __cplusplus
 }
 #endif
