@@ -111,6 +111,16 @@ check("info ota/init: hostile tags are DATA (no injected keys), cut to buffer",
       set(d["ota"]) == {"last", "http", "at_s"} and "y" not in d and "x" not in d["audio"]
       and d["ota"]["last"].startswith('bad","y":2') and len(d["ota"]["last"]) == 23
       and d["audio"]["init"].startswith('i2s","x":1') and len(d["audio"]["init"]) == 23, d)
+d = J("info_dsp")["data"]["audio"]
+check("info dsp: writes, read-back matches, mic gain and XMOS version in audio.dsp",
+      d.get("dsp") == {"ok": 7, "total": 7, "rb": 7, "mic_gain": 55.0, "ver": "1.0.7"}, d)
+d = J("info_dsp_fail")["data"]["audio"]
+check("info dsp: failed gain/version reads -> null, counts kept",
+      d.get("dsp") == {"ok": 5, "total": 7, "rb": 2, "mic_gain": None, "ver": None}, d)
+d = J("info_dsp_round")["data"]["audio"]
+check("info dsp: mic gain rounded to 0.1", d.get("dsp", {}).get("mic_gain") == 55.0 and d["dsp"]["ver"] == "1.0.8", d)
+check("info dsp: absent when the profile never ran (waveshare, older callers)",
+      "dsp" not in J("info_link_ota")["data"]["audio"] and "dsp" not in J("info_audio")["data"]["audio"], J("info_link_ota")["data"])
 d = J("scan_mixed")["data"]
 check("scan: forging SSID is one key, no injected key",
       'a","injected":1,"b' in d and "injected" not in d and d['a","injected":1,"b'] == -55, d)
