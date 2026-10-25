@@ -1,5 +1,7 @@
 #include "main.h"
+#include "cmd_json.h"
 #include "boot_diag.h"
+#include "rgb.h"
 
 #ifndef LINUX_BUILD
 
@@ -16,7 +18,8 @@
 #include <nvs.h>
 
 static const char *OTA_TAG = "ota";
-static bool rollback_retry_allowed(const char *remote);  /* defined below */
+static bool rollback_retry_allowed(const char *remote, uint8_t *spend);  /* defined below */
+static bool rollback_retry_spend(const char *remote, uint8_t n);
 
 /* Wait for the station to have an IP before any HTTP (2026-09-19): the boot
  * check fired ~1s after esp_wifi_start and lost the race — got-ip lands ~1s
@@ -149,9 +152,48 @@ static volatile bool s_ota_in_flight = false;
 static volatile bool s_drop_deferred = false;
 
 bool pipecat_ota_busy(void) { return s_ota_in_flight; }
+
+/* Last OTA outcome this boot, for get_info: every failure used to be
+ * serial-only, so a node that refused or failed an update just sat there.
+ * `last` is always a string literal (the tags below), `http` the last HTTP
+ * status the check or download saw (0 = none yet), `at_s` the uptime when
+ * the outcome was recorded. Written by the OTA task, read by the RTVI task:
+ * a short critical section keeps the three fields consistent.
+ *   none                 no check has finished yet
+ *   up-to-date           the bot offers nothing newer
+ *   check-failed         version GET failed (network/TLS) or its body was unusable
+ *   bad-http             the check or the download got a non-200 (see http)
+ *   wrong-board          the image is for another board line
+ *   version-mismatch     the image's own version isn't the one the manifest offered
+ *   refused-rolled-back  that version already rolled back too many times
+ *   too-big              the image doesn't fit the OTA partition
+ *   download-failed      connection or read error mid-download
+ *   flash-failed         writing, validating or activating the image failed
+ *   deferred             an attempt failed (often a starved session dropping);
+ *                        the next attempt is scheduled
+ *   updated              new image flashed, rebooting into it */
+static portMUX_TYPE s_status_mux = portMUX_INITIALIZER_UNLOCKED;
+static cmd_ota_status_t s_status = {"none", 0, 0};
+
+/* http 0 = no new status code: keep the last one seen. */
+static void ota_record(const char *tag, int http) {
+    uint32_t now = boot_diag_up_s();
+    taskENTER_CRITICAL(&s_status_mux);
+    s_status.last = tag;
+    if (http != 0) s_status.http = http;
+    s_status.at_s = now;
+    taskEXIT_CRITICAL(&s_status_mux);
+}
+
+extern "C" void pipecat_ota_status(cmd_ota_status_t *out) {
+    taskENTER_CRITICAL(&s_status_mux);
+    *out = s_status;
+    taskEXIT_CRITICAL(&s_status_mux);
+}
 void pipecat_ota_defer_drop(void) { s_drop_deferred = true; }
 
-static esp_err_t download_and_flash_ota_impl(const char *firmware_url);
+static esp_err_t download_and_flash_ota_impl(const char *firmware_url, const char *remote_version,
+                                             uint8_t rb_spend);
 
 /* Download retry (2026-10-15): the check runs ONCE per boot, so one
  * transient failure (WiFi blip, bot restarting, a truncated read) used to
@@ -160,19 +202,28 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url);
  * clean restart of the download. */
 #define OTA_DOWNLOAD_ATTEMPTS 3
 #define OTA_ERR_WRONG_BOARD ESP_ERR_NOT_SUPPORTED   /* fw M4 refusal: never retried */
+/* Also never retried: the same file will be just as wrong next time. */
+#define OTA_ERR_VERSION_MISMATCH ESP_ERR_INVALID_VERSION
+#define OTA_ERR_TOO_BIG ESP_ERR_INVALID_SIZE
 static const uint32_t k_ota_retry_delay_ms[OTA_DOWNLOAD_ATTEMPTS - 1] = {10000, 30000};
 
-static esp_err_t download_and_flash_ota(const char *firmware_url) {
+static esp_err_t download_and_flash_ota(const char *firmware_url, const char *remote_version,
+                                        uint8_t rb_spend) {
     s_ota_in_flight = true;  // webrtc disconnect handler must NOT reboot now
+    /* The ring shows UPDATING for the whole download + flash, retry waits
+     * included: unplugging now throws the update away. */
+    rgb_set_state(RGB_STATE_UPDATING);
     esp_err_t rc = ESP_FAIL;
     for (int attempt = 1; attempt <= OTA_DOWNLOAD_ATTEMPTS; attempt++) {
-        rc = download_and_flash_ota_impl(firmware_url);
-        if (rc == ESP_OK || rc == OTA_ERR_WRONG_BOARD) break;  /* wrong line: retrying can't help */
+        rc = download_and_flash_ota_impl(firmware_url, remote_version, rb_spend);
+        if (rc == ESP_OK || rc == OTA_ERR_WRONG_BOARD ||
+            rc == OTA_ERR_VERSION_MISMATCH || rc == OTA_ERR_TOO_BIG) break;
         if (attempt < OTA_DOWNLOAD_ATTEMPTS) {
             uint32_t delay_ms = k_ota_retry_delay_ms[attempt - 1];
             ESP_LOGW(OTA_TAG, "OTA attempt %d/%d failed (%s) — retrying in %lu s",
                      attempt, OTA_DOWNLOAD_ATTEMPTS, esp_err_to_name(rc),
                      (unsigned long)(delay_ms / 1000));
+            ota_record("deferred", 0);
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
         }
     }
@@ -186,6 +237,9 @@ static esp_err_t download_and_flash_ota(const char *firmware_url) {
             vTaskDelay(pdMS_TO_TICKS(500));  /* let the log line leave */
             boot_diag_restart("ota-failed-deferred");
         }
+        /* The session is still up: back to connected-idle. UPDATING sticks
+         * against everything else (rgb.c), so this clear is explicit. */
+        rgb_set_state(RGB_STATE_BRIDGE_CONNECTED);
     }
     return rc;
 }
@@ -200,27 +254,40 @@ static esp_err_t download_and_flash_ota(const char *firmware_url) {
  * only step that matters. Writing the inactive partition first is harmless. */
 #define OTA_IDENT_BYTES 112
 #define OTA_IDENT_MAGIC_OFF 32
+#define OTA_IDENT_VERSION_OFF 48
 #define OTA_IDENT_NAME_OFF 80
 
-static bool incoming_image_is_ours(const uint8_t *hdr) {
+/* ESP_OK, OTA_ERR_WRONG_BOARD, or OTA_ERR_VERSION_MISMATCH. The version
+ * check catches a manifest that names a newer version than the .bin it
+ * points at: flashing it would boot the older image, see "update available"
+ * again and reflash on every boot, passing the health gate each time. */
+static esp_err_t incoming_image_is_ours(const uint8_t *hdr, const char *remote_version) {
     const uint8_t magic[4] = {0x32, 0x54, 0xCD, 0xAB};   /* ESP_APP_DESC_MAGIC_WORD, LE */
     const char *ours = esp_app_get_description()->project_name;
     char theirs[33] = {0};
+    char their_version[33] = {0};
     if (memcmp(hdr + OTA_IDENT_MAGIC_OFF, magic, sizeof(magic)) != 0) {
         ESP_LOGE(OTA_TAG, "incoming image has no app descriptor — not flashing");
-        return false;
+        return OTA_ERR_WRONG_BOARD;
     }
     memcpy(theirs, hdr + OTA_IDENT_NAME_OFF, 32);
     if (strncmp(theirs, ours, 32) != 0) {
         ESP_LOGE(OTA_TAG, "incoming image is '%s' but this board runs '%s' — wrong "
                  "firmware line, refusing it (cross-flash guard)", theirs, ours);
-        return false;
+        return OTA_ERR_WRONG_BOARD;
     }
-    ESP_LOGI(OTA_TAG, "incoming image identity OK (%s)", theirs);
-    return true;
+    memcpy(their_version, hdr + OTA_IDENT_VERSION_OFF, 32);
+    if (strncmp(their_version, remote_version, 32) != 0) {
+        ESP_LOGE(OTA_TAG, "incoming image is version '%s' but the manifest offered '%s' — "
+                 "not flashing", their_version, remote_version);
+        return OTA_ERR_VERSION_MISMATCH;
+    }
+    ESP_LOGI(OTA_TAG, "incoming image identity OK (%s %s)", theirs, their_version);
+    return ESP_OK;
 }
 
-static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
+static esp_err_t download_and_flash_ota_impl(const char *firmware_url, const char *remote_version,
+                                             uint8_t rb_spend) {
     /* The TLS read path needs internal DMA-capable RAM (hardware AES bounce
      * buffer). Log it on every attempt so a RAM squeeze shows up as numbers,
      * not as "esp-aes: Failed to allocate memory" (2026-10-15). */
@@ -239,12 +306,14 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
         ESP_LOGE(OTA_TAG, "Failed to init HTTP client");
+        ota_record("download-failed", 0);
         return ESP_FAIL;
     }
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+        ota_record("download-failed", 0);
         esp_http_client_cleanup(client);
         return err;
     }
@@ -255,12 +324,14 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
         /* A 404/500 body used to be streamed into the OTA partition until
          * esp_ota_write rejected the magic byte — fail cleanly instead. */
         ESP_LOGE(OTA_TAG, "Firmware download HTTP %d — not flashing", status);
+        ota_record("bad-http", status);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         return ESP_FAIL;
     }
     if (content_length <= 0) {
         ESP_LOGE(OTA_TAG, "No content-length header");
+        ota_record("download-failed", status);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         return ESP_FAIL;
@@ -272,9 +343,20 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
     if (!update_partition) {
         ESP_LOGE(OTA_TAG, "No OTA partition available");
+        ota_record("flash-failed", status);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         return ESP_FAIL;
+    }
+    /* Refuse before esp_ota_begin erases anything: an oversized image would
+     * otherwise erase and write the whole slot before esp_ota_write says no. */
+    if ((uint32_t)content_length > update_partition->size) {
+        ESP_LOGE(OTA_TAG, "image is %d bytes but partition %s holds %lu — not flashing",
+                 content_length, update_partition->label, (unsigned long)update_partition->size);
+        ota_record("too-big", status);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return OTA_ERR_TOO_BIG;
     }
     ESP_LOGI(OTA_TAG, "Writing to partition %s at offset 0x%lx",
              update_partition->label, update_partition->address);
@@ -283,6 +365,7 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
     err = esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &update_handle);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_TAG, "esp_ota_begin failed: %s", esp_err_to_name(err));
+        ota_record("flash-failed", status);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         return err;
@@ -291,6 +374,7 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
     char *buf = (char *)malloc(OTA_DOWNLOAD_BUF_SIZE);
     if (!buf) {
         ESP_LOGE(OTA_TAG, "Failed to allocate download buffer");
+        ota_record("download-failed", status);
         esp_ota_abort(update_handle);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
@@ -298,14 +382,16 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
     }
 
     int total_read = 0;
+    int next_log = content_length / 10;  /* progress line every 10% */
     bool error = false;
-    bool wrong_board = false;
+    esp_err_t refused = ESP_OK;
     uint8_t ident[OTA_IDENT_BYTES];
     int ident_len = 0;
     while (total_read < content_length) {
         int read_len = esp_http_client_read(client, buf, OTA_DOWNLOAD_BUF_SIZE);
         if (read_len <= 0) {
             ESP_LOGE(OTA_TAG, "HTTP read error at %d/%d", total_read, content_length);
+            ota_record("download-failed", status);
             error = true;
             break;
         }
@@ -313,22 +399,30 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
             int take = read_len < OTA_IDENT_BYTES - ident_len ? read_len : OTA_IDENT_BYTES - ident_len;
             memcpy(ident + ident_len, buf, take);
             ident_len += take;
-            if (ident_len == OTA_IDENT_BYTES && !incoming_image_is_ours(ident)) {
-                wrong_board = true;
-                error = true;
-                break;
+            if (ident_len == OTA_IDENT_BYTES) {
+                refused = incoming_image_is_ours(ident, remote_version);
+                if (refused != ESP_OK) {
+                    ota_record(refused == OTA_ERR_VERSION_MISMATCH ? "version-mismatch"
+                                                                   : "wrong-board", status);
+                    error = true;
+                    break;
+                }
             }
         }
         err = esp_ota_write(update_handle, buf, read_len);
         if (err != ESP_OK) {
             ESP_LOGE(OTA_TAG, "esp_ota_write failed: %s", esp_err_to_name(err));
+            ota_record("flash-failed", status);
             error = true;
             break;
         }
         total_read += read_len;
-        if (total_read % (64 * 1024) == 0) {
+        /* TLS reads come in arbitrary sizes, so an exact-boundary test
+         * (total % 64 KB == 0) almost never printed. */
+        if (total_read >= next_log) {
             ESP_LOGI(OTA_TAG, "Progress: %d/%d (%d%%)", total_read, content_length,
-                     total_read * 100 / content_length);
+                     (int)((int64_t)total_read * 100 / content_length));
+            next_log += content_length / 10;
         }
     }
 
@@ -336,12 +430,13 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
-    if (wrong_board) {
+    if (refused != ESP_OK) {
         esp_ota_abort(update_handle);
-        return OTA_ERR_WRONG_BOARD;
+        return refused;
     }
     if (error || total_read != content_length || ident_len < OTA_IDENT_BYTES) {
         ESP_LOGE(OTA_TAG, "Download incomplete: %d/%d", total_read, content_length);
+        if (!error) ota_record("download-failed", status);
         esp_ota_abort(update_handle);
         return ESP_FAIL;
     }
@@ -349,12 +444,22 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url) {
     err = esp_ota_end(update_handle);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
+        ota_record("flash-failed", status);
         return err;
+    }
+
+    /* The rollback retry is spent only now that a complete, valid image is
+     * in the slot: a download that dies on the network costs nothing. If the
+     * count can't be saved, don't switch (a bad image could loop forever). */
+    if (rb_spend != 0 && !rollback_retry_spend(remote_version, rb_spend)) {
+        ota_record("flash-failed", status);
+        return ESP_FAIL;
     }
 
     err = esp_ota_set_boot_partition(update_partition);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
+        ota_record("flash-failed", status);
         return err;
     }
 
@@ -396,12 +501,14 @@ void pipecat_check_ota_update(void) {
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
         ESP_LOGW(OTA_TAG, "Failed to init HTTP client for version check");
+        ota_record("check-failed", 0);
         return;
     }
 
     esp_err_t err = esp_http_client_perform(client);
     if (err != ESP_OK) {
         ESP_LOGW(OTA_TAG, "Version check failed: %s", esp_err_to_name(err));
+        ota_record("check-failed", 0);
         esp_http_client_cleanup(client);
         return;
     }
@@ -411,11 +518,13 @@ void pipecat_check_ota_update(void) {
 
     if (status != 200) {
         ESP_LOGW(OTA_TAG, "Version check returned HTTP %d", status);
+        ota_record("bad-http", status);
         return;
     }
 
     if (strlen(response_buf) == 0) {
         ESP_LOGW(OTA_TAG, "Version check: empty response");
+        ota_record("check-failed", status);
         return;
     }
 
@@ -425,6 +534,7 @@ void pipecat_check_ota_update(void) {
     if (parse_version_from_json(response_buf, remote_version, sizeof(remote_version),
                                 remote_filename, sizeof(remote_filename)) != 0) {
         ESP_LOGW(OTA_TAG, "Could not parse JSON: %s", response_buf);
+        ota_record("check-failed", status);
         return;
     }
 
@@ -434,6 +544,7 @@ void pipecat_check_ota_update(void) {
 
     if (compare_versions(local_version, remote_version) >= 0) {
         ESP_LOGI(OTA_TAG, "Firmware is up to date");
+        ota_record("up-to-date", status);
         return;
     }
 
@@ -441,7 +552,9 @@ void pipecat_check_ota_update(void) {
 
     /* never reflash-loop a version the bootloader already rolled
      * back from (bounded retries, then refuse). */
-    if (!rollback_retry_allowed(remote_version)) {
+    uint8_t rb_spend = 0;
+    if (!rollback_retry_allowed(remote_version, &rb_spend)) {
+        ota_record("refused-rolled-back", status);
         return;
     }
 
@@ -454,12 +567,13 @@ void pipecat_check_ota_update(void) {
 
     ESP_LOGI(OTA_TAG, "Downloading firmware from %s", firmware_url);
 
-    err = download_and_flash_ota(firmware_url);
+    err = download_and_flash_ota(firmware_url, remote_version, rb_spend);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_TAG, "OTA update failed: %s", esp_err_to_name(err));
         return;
     }
 
+    ota_record("updated", 200);
     ESP_LOGI(OTA_TAG, "OTA update successful, rebooting in 2 seconds...");
     vTaskDelay(pdMS_TO_TICKS(2000));
     boot_diag_restart("ota-success");
@@ -505,6 +619,28 @@ void pipecat_check_ota_update(void) {
 
 static volatile bool s_pending_verify = false;
 static TaskHandle_t s_health_task = NULL;
+/* The version the bootloader rolled back from, read once at boot. A later
+ * download overwrites that slot from its first sector, so the slot header
+ * is only trustworthy before any download starts; when an earlier partial
+ * download already erased it, the name recorded in NVS stands in. */
+static char s_rejected[32] = {0};
+static bool s_rejected_from_slot = false;
+
+static void rejected_version_load(void) {
+    const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
+    if (bad == NULL) return;  /* no rolled-back image in the other slot */
+    esp_app_desc_t d;
+    if (esp_ota_get_partition_description(bad, &d) == ESP_OK) {
+        strlcpy(s_rejected, d.version, sizeof(s_rejected));
+        s_rejected_from_slot = true;
+        return;
+    }
+    nvs_handle_t h;
+    if (nvs_open(OTA_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    size_t len = sizeof(s_rejected);
+    if (nvs_get_str(h, OTA_NVS_KEY_RB_VER, s_rejected, &len) != ESP_OK) s_rejected[0] = '\0';
+    nvs_close(h);
+}
 
 static void ota_health_task(void *arg) {
     uint32_t ok = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(OTA_HEALTH_TIMEOUT_MS));
@@ -534,6 +670,7 @@ static void ota_health_task(void *arg) {
 void pipecat_ota_health_begin(void) {
     /* Boot-time: READ-ONLY (state query + task spawn) — no flash write
      * here, so the pre-WiFi call site stays exactly as safe as before. */
+    rejected_version_load();
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t state;
     if (esp_ota_get_state_partition(running, &state) != ESP_OK ||
@@ -561,45 +698,72 @@ void pipecat_ota_health_ok(void) {
 bool pipecat_ota_rejected_version(char *out, size_t out_len) {
     /* The version the bootloader rolled back FROM, if the other slot holds
      * one (reported in fw_push so the bot can surface a silent rollback). */
-    const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
-    esp_app_desc_t d;
-    if (bad == NULL || esp_ota_get_partition_description(bad, &d) != ESP_OK) return false;
-    strncpy(out, d.version, out_len - 1);
+    if (s_rejected[0] == '\0') return false;
+    strncpy(out, s_rejected, out_len - 1);
     out[out_len - 1] = '\0';
     return true;
 }
 
-/* true = OK to download `remote`; false = refuse (rolled back too often). */
-static bool rollback_retry_allowed(const char *remote) {
-    char bad_ver[32];
-    if (!pipecat_ota_rejected_version(bad_ver, sizeof(bad_ver)) ||
-        strcmp(bad_ver, remote) != 0) {
-        return true;  /* remote isn't the version that rolled back */
-    }
+/* true = OK to download `remote`; false = refuse (rolled back too often).
+ * Read-mostly: *spend is the retry count to save once the image is flashed
+ * (0 = remote isn't the rolled-back version, nothing to count). The only
+ * write here records the rolled-back version's name the first time it is
+ * seen, before any download can erase the slot header that holds it. */
+static bool rollback_retry_allowed(const char *remote, uint8_t *spend) {
+    *spend = 0;
+    if (s_rejected[0] == '\0') return true;  /* nothing rolled back */
     nvs_handle_t h;
     if (nvs_open(OTA_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        if (strcmp(s_rejected, remote) != 0) return true;
         ESP_LOGW(OTA_TAG, "rollback guard: NVS unavailable — refusing %s (fail safe)", remote);
         return false;
     }
     char seen[32] = {0};
     size_t len = sizeof(seen);
     uint8_t n = 0;
-    if (nvs_get_str(h, OTA_NVS_KEY_RB_VER, seen, &len) == ESP_OK && strcmp(seen, remote) == 0) {
+    if (nvs_get_str(h, OTA_NVS_KEY_RB_VER, seen, &len) == ESP_OK &&
+        strcmp(seen, s_rejected) == 0) {
         nvs_get_u8(h, OTA_NVS_KEY_RB_N, &n);
+    } else if (s_rejected_from_slot) {
+        /* First sighting of this rollback: a fresh count for it. */
+        nvs_set_str(h, OTA_NVS_KEY_RB_VER, s_rejected);
+        nvs_set_u8(h, OTA_NVS_KEY_RB_N, 0);
+        nvs_commit(h);
+    }
+    nvs_close(h);
+    if (strcmp(s_rejected, remote) != 0) {
+        return true;  /* remote isn't the version that rolled back */
     }
     bool allowed = n < OTA_ROLLBACK_MAX_RETRIES;
     if (allowed) {
-        nvs_set_str(h, OTA_NVS_KEY_RB_VER, remote);
-        nvs_set_u8(h, OTA_NVS_KEY_RB_N, (uint8_t)(n + 1));
-        nvs_commit(h);
+        *spend = (uint8_t)(n + 1);
         ESP_LOGW(OTA_TAG, "%s was rolled back before — retry %u/%u (the gate can fail "
                  "for bot-side reasons)", remote, n + 1, OTA_ROLLBACK_MAX_RETRIES);
     } else {
         ESP_LOGE(OTA_TAG, "refusing %s: rolled back %u times — ship a NEW version "
                  "(or USB) to move this node", remote, OTA_ROLLBACK_MAX_RETRIES + 1);
     }
-    nvs_close(h);
     return allowed;
+}
+
+/* Save retry `n` for `remote`. Runs on the ota_check task (internal-RAM
+ * stack) after esp_ota_end, so the NVS write is safe. */
+static bool rollback_retry_spend(const char *remote, uint8_t n) {
+    nvs_handle_t h;
+    if (nvs_open(OTA_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGE(OTA_TAG, "rollback guard: NVS unavailable — not switching to %s", remote);
+        return false;
+    }
+    esp_err_t err = nvs_set_str(h, OTA_NVS_KEY_RB_VER, remote);
+    if (err == ESP_OK) err = nvs_set_u8(h, OTA_NVS_KEY_RB_N, n);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(OTA_TAG, "rollback guard: saving retry %u failed (%s) — not switching to %s",
+                 n, esp_err_to_name(err), remote);
+        return false;
+    }
+    return true;
 }
 
 #endif // LINUX_BUILD

@@ -26,10 +26,9 @@ const char *settings_get_node_name(void);
 const char *settings_get_wifi_ssid(void);
 const char *settings_get_wifi_pass(void);
 
-/* Persist new values. Empty/NULL ssid or pass keeps the current one.
- * Returns 0 on success, negative esp_err_t codes on NVS failure. */
+/* Persist a new node name. Returns 0 on success, negative esp_err_t codes
+ * on NVS failure. (Wi-Fi creds change only through the trial below.) */
 int settings_set_node_name(const char *name);   /* trimmed, [A-Za-z0-9_-]{1,31} */
-int settings_set_wifi(const char *ssid, const char *password);
 
 /* Wi-Fi change trial (M1, 1.2.23 — see wifi_trial.h). begin: previous =
  * current, current = new, trial = 1, one commit (caller then reboots).
@@ -45,13 +44,15 @@ bool settings_wifi_rolled_back(void);
 int settings_wifi_trial_passed(void);
 
 /* Mic mute (H4, 2026-10-16): persisted so a muted node stays muted across
- * reboots and OTA. Unset = unmuted. */
+ * reboots and OTA. Unset = unmuted. set_muted is serialised (set_mute and
+ * the array's button both save); call it from an internal-RAM stack. */
 bool settings_get_muted(void);
 int settings_set_muted(bool muted);
 
-/* ESP32 station hostname derived from node_name (lowercase, RFC-valid
- * for DHCP): "living_room" -> "living_room".local on mDNS later; used
- * for esp_netif_set_hostname() so the router AP list shows the name. */
+/* ESP32 station hostname derived from node_name (lowercase, RFC-valid for
+ * DHCP: anything but a-z/0-9 becomes '-', no leading/trailing '-', max 63):
+ * "Living_Room" -> "living-room". Used for esp_netif_set_hostname() so the
+ * router's client list shows the name. "" if nothing valid is left. */
 const char *settings_hostname(void);
 
 #ifdef __cplusplus

@@ -107,9 +107,13 @@ static int32_t    s_lvl_peak;
 static int        s_lvl_reads;
 #endif
 
+/* The mic init step that failed (a string literal), for get_info. */
+static const char *s_init_failed_step;
+
 static esp_err_t fail(const char *step, esp_err_t err) {
     ESP_LOGE(TAG, "board_audio: %s failed: %s", step, esp_err_to_name(err));
     s_dead = true;
+    if (s_init_failed_step == NULL) s_init_failed_step = step;
     /* Whatever failed, never leave the speaker PA on (best effort). Write the
      * output register directly: works whatever the pin direction is. */
     if (s_io_exp) s_io_exp->write_output_reg(s_io_exp, 0xFFFF & ~(uint32_t)EXIO_PA_EN);
@@ -406,6 +410,8 @@ void board_audio_speaker_set(bool enabled, int volume) {
     ESP_LOGI(TAG, "board_audio: speaker %s, vol %d%s", enabled ? "enabled" : "disabled",
              volume, s_speaker_ok ? "" : " (speaker not up)");
 }
+
+const char *board_audio_init_failed_step(void) { return s_init_failed_step; }
 
 int board_audio_speaker_volume(void) { return s_spk_volume; }
 

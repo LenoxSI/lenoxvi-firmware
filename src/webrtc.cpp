@@ -14,7 +14,10 @@
 #include "rgb.h"
 #include "cmd.h"
 
-static PeerConnection *peer_connection = NULL;
+/* Written by the webrtc_init task, read by the main loop: the loop starts at
+ * got-ip and can run before peer_connection_create() returns, so it checks
+ * for NULL (volatile so it re-reads instead of caching the NULL). */
+static PeerConnection *volatile peer_connection = NULL;
 
 #ifndef LINUX_BUILD
 StaticTask_t task_buffer;
@@ -28,12 +31,32 @@ void pipecat_send_audio_task(void *user_data) {
 }
 #endif
 
+/* Largest bot message we accept; RTVI control messages are a few hundred bytes. */
+#define DC_MESSAGE_MAX 4096
+
 static void pipecat_ondatachannel_onmessage_task(char *msg, size_t len,
                                                  void *userdata, uint16_t sid) {
+  /* libpeer hands over the raw SCTP payload as (msg, len): it is not
+   * NUL-terminated, and the bytes after it belong to the packet buffer. The
+   * RTVI parser takes a C string, so give it a terminated copy. */
+  if (len > DC_MESSAGE_MAX) {
+    ESP_LOGW(LOG_TAG, "dropping %u-byte data channel message (max %d)",
+             (unsigned)len, DC_MESSAGE_MAX);
+    return;
+  }
+  char *text = (char *)malloc(len + 1);
+  if (text == NULL) {
+    ESP_LOGE(LOG_TAG, "dropping %u-byte data channel message: out of memory",
+             (unsigned)len);
+    return;
+  }
+  memcpy(text, msg, len);
+  text[len] = '\0';
 #ifdef LOG_DATACHANNEL_MESSAGES
-  ESP_LOGI(LOG_TAG, "DataChannel Message: %s", msg);
+  ESP_LOGI(LOG_TAG, "DataChannel Message: %s", text);
 #endif
-  pipecat_rtvi_handle_message(msg);
+  pipecat_rtvi_handle_message(text);
+  free(text);
 }
 
 /* SCTP open watchdog (2026-09-19): the data channel is a coin flip at
@@ -93,7 +116,12 @@ static void dc_create_delayed_task(void *arg) {
 }
 
 static void pipecat_ondatachannel_onopen_task(void *userdata) {
-  xTaskCreate(dc_create_delayed_task, "dc_create", 3072, NULL, 5, NULL);
+  /* Without this task the channel is never created and the DC watchdog
+   * would reboot 20 s later as "dc-never-opened", blaming the handshake. */
+  if (xTaskCreate(dc_create_delayed_task, "dc_create", 3072, NULL, 5, NULL) != pdPASS) {
+    ESP_LOGE(LOG_TAG, "dc_create task spawn failed (out of memory) — rebooting");
+    boot_diag_restart("dc-task-oom");
+  }
 }
 
 static void check_connect_watchdog(void) {
@@ -118,19 +146,20 @@ static void check_dc_watchdog(void) {
 /* The session is over: re-roll (reboot -> fresh offer). One path for
  * every way a session ends, tagged for get_info boot.why. */
 static void pipecat_session_over(const char *why) {
-  rgb_set_state(RGB_STATE_ERROR);
   /* OTA flash in flight (2026-10-05): the churn loop — five reboots
    * to land one 1.2MB flash — was THIS esp_restart() firing mid-
    * download (the pull starves the audio task, the peer drops, the
    * handler reboots before esp_ota_write finishes). The OTA task
    * owns the only reboot during a flash; a dropped session during
    * a flash is EXPECTED — it re-offers when the OTA task reboots
-   * the node with the new image. */
+   * the node with the new image. The LED keeps showing UPDATING: a red
+   * ERROR here invites a power-cycle in the middle of the flash. */
   if (pipecat_ota_busy()) {
     ESP_LOGW(LOG_TAG, "session over (%s) mid-OTA — not rebooting, flash in flight", why);
     pipecat_ota_defer_drop();  /* a FAILED flash reboots instead (ota.cpp) */
     return;
   }
+  rgb_set_state(RGB_STATE_ERROR);
 #ifndef LINUX_BUILD
   vTaskDelay(pdMS_TO_TICKS(3000));
   boot_diag_restart(why);
@@ -282,7 +311,9 @@ void pipecat_init_webrtc() {
 }
 
 void pipecat_webrtc_loop() {
-  peer_connection_loop(peer_connection);
+  PeerConnection *pc = peer_connection;
+  if (pc == NULL) return;  /* webrtc_init hasn't created it yet */
+  peer_connection_loop(pc);
   check_connect_watchdog();
   check_dc_watchdog();
   if (dc_opened) cmd_service_mute_push();   /* H4: button changes reach the bot */

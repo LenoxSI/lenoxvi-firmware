@@ -6,11 +6,14 @@
  * The reply echoes the request's "id" (1.2.37; a request without one gets a
  * reply without one). Unprompted pushes never carry an id.
  *
- * Existing RTVI "type" messages are untouched; anything with a "cmd"
+ * Existing RTVI "type" messages are untouched; anything with a string "cmd"
  * field routes here (rtvi.cpp tries cmd first). Bot -> node: ping, pong,
  * restart, get_info, set_mute, set_name, scan, set_wifi, and set_speaker
  * (waveshare). Node -> bot, unprompted in the same envelope: fw_push (on
- * channel open), mute_push (array button), probe (liveness).
+ * channel open), mute_push (array button), and probe, whose "data" says why:
+ * "liveness" (30 s after connect, then every 5 min) or "ota_health" (once at
+ * channel open while a fresh OTA image awaits its first bot round-trip).
+ * The bot answers a probe with {"cmd":"pong"}.
  */
 
 #include "cmd.h"
@@ -91,7 +94,7 @@ void cmd_send_simple(const char *cmd, bool ok, const char *note) {
  * second write straight after the first could re-create a task on a TCB
  * the kernel still had on its lists.) */
 typedef struct {
-  int kind;  /* 0 = set_name, 1 = set_wifi (starts a trial), 2 = mute (a != NULL = muted) */
+  int kind;  /* 0 = set_name, 1 = set_wifi (starts a trial), 2 = save the mute state */
   const char *a, *b;
   int rc;
 } nvs_job_t;
@@ -105,9 +108,12 @@ static void nvs_job_task(void *arg) {
   (void)arg;
   while (1) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  /* nvs_run posts a job */
+    /* Mute saves the state as it is NOW, not as it was when the job was
+     * posted: a button press in between must not be overwritten by the
+     * older value. */
     s_job.rc = s_job.kind == 0 ? settings_set_node_name(s_job.a)
              : s_job.kind == 1 ? settings_begin_wifi_trial(s_job.a, s_job.b)
-                               : settings_set_muted(s_job.a != NULL);
+                               : settings_set_muted(pipecat_mic_muted());
     xSemaphoreGive(s_job_done);
   }
 }
@@ -157,10 +163,20 @@ static void do_scan(void) {
    * for a dashboard-triggered scan (the bot knows to wait). Blocking
    * scan while associated is supported by the WiFi driver. */
   wifi_scan_config_t cfg = {};
-  esp_wifi_scan_start(&cfg, true);
+  esp_err_t err = esp_wifi_scan_start(&cfg, true);
+  if (err != ESP_OK) {
+    /* e.g. ESP_ERR_WIFI_STATE while (re)associating: say so, rather than
+     * reply an empty list the dashboard shows as "no networks". */
+    ESP_LOGW(TAG, "scan: start failed: %s", esp_err_to_name(err));
+    cmd_send_simple("scan", false, esp_err_to_name(err));
+    return;
+  }
   uint16_t n = 0;
   esp_wifi_scan_get_ap_num(&n);
-  if (n > 24) n = 24;  /* cap the reply size */
+  /* Fetch more access points than we reply with: a mesh network shows up
+   * once per access point, so the cap is applied to distinct names below,
+   * not to raw entries (that could cut the user's own network). */
+  if (n > 48) n = 48;
   /* +1: malloc(0) may return NULL — an empty scan is an empty list, not
    * "oom" (the pre-1.2.20 code reported oom with no networks in range). */
   wifi_ap_record_t *aps =
@@ -176,19 +192,41 @@ static void do_scan(void) {
   esp_wifi_scan_get_ap_records(&got, aps);
   int kept = 0;
   for (int i = 0; i < got; i++) {
-    /* dedupe: driver returns one entry per channel per SSID */
-    bool dup = false;
-    for (int j = 0; j < i; j++) {
-      if (strncmp((char *)aps[j].ssid, (char *)aps[i].ssid, 32) == 0) {
-        dup = true; break;
-      }
+    char ssid[33], clean[33];
+    memcpy(ssid, aps[i].ssid, 32);
+    ssid[32] = 0;
+    /* Hidden networks have no name to pick. A name that isn't valid UTF-8
+     * would be shown with '?' substitutions — a name that doesn't exist on
+     * air, so joining it could only fail. Leave both out. */
+    if (ssid[0] == 0) continue;
+    cmd_json_utf8_sanitize(ssid, clean, sizeof(clean));
+    if (strcmp(ssid, clean) != 0) continue;
+    /* dedupe: the driver returns one entry per access point; keep the
+     * strongest signal for each name */
+    int j = 0;
+    while (j < kept && strcmp((char *)names[j], ssid) != 0) j++;
+    if (j < kept) {
+      if (aps[i].rssi > rssi[j]) rssi[j] = aps[i].rssi;
+      continue;
     }
-    if (dup) continue;
-    memcpy(names[kept], aps[i].ssid, 33);
-    names[kept][32] = 0;
+    memcpy(names[kept], ssid, 33);
     rssi[kept] = aps[i].rssi;
     kept++;
   }
+  /* Strongest first, then cap the reply size: the networks cut (here, or by
+   * the byte cap in cmd_json_scan) are the weakest ones. */
+  for (int i = 1; i < kept; i++) {
+    for (int j = i; j > 0 && rssi[j] > rssi[j - 1]; j--) {
+      uint8_t t_name[33];
+      memcpy(t_name, names[j], 33);
+      memcpy(names[j], names[j - 1], 33);
+      memcpy(names[j - 1], t_name, 33);
+      int8_t t_rssi = rssi[j];
+      rssi[j] = rssi[j - 1];
+      rssi[j - 1] = t_rssi;
+    }
+  }
+  if (kept > 24) kept = 24;
   /* M7 (1.2.20): network names come off the AIR — any neighbour can name a
    * network `a","x":1`. cJSON escapes them and invalid UTF-8 becomes '?'
    * (cmd_json.c); output capped like the old 1400 B buffer. */
@@ -286,9 +324,14 @@ static bool cmd_dispatch(const cJSON *msg) {
     wifi_ap_record_t ap;              /* reboot black box + link (1.2.29) */
     cmd_ka_stats_t ka;  /* libpeer 0004 keepalive counters (1.2.36) */
     agent_keepalive_stats(&ka.sent, &ka.resent, &ka.rescued);
+    cmd_link_stats_t link;
+    pipecat_wifi_link_stats(&link);
+    cmd_ota_status_t ota;
+    pipecat_ota_status(&ota);
     cmd_boot_info_t bi = {boot_diag_reason(), boot_diag_prev_why(),
                           boot_diag_prev_up_s(), boot_diag_up_s(),
-                          esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0, &ka};
+                          esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0, &ka,
+                          &link, &ota};
     char *reply = cmd_json_info(settings_get_node_name(), mac,
                                 esp_app_get_description()->version, XVF_OTA_TRACK,
                                 pipecat_mic_muted(), dbg_btn, &au, &bi);
@@ -302,10 +345,16 @@ static bool cmd_dispatch(const cJSON *msg) {
     /* Mic mute (flex 1.1.0; both boards since 1.2.11, H4): "mute":
      * true|false, or omit for toggle. Persisted; on array it drives the
      * same XMOS pin as the physical button (red LED). Echoes the resulting
-     * state so the dashboard renders truth from the ack, not optimistic UI. */
+     * state so the dashboard renders truth from the ack, not optimistic UI.
+     * A "mute" that is present but not a bool is refused: an explicit value
+     * must never invert the state. */
     const cJSON *j_mute = cJSON_GetObjectItem(msg, "mute");
+    if (j_mute != NULL && !cJSON_IsBool(j_mute)) {
+      cmd_send_simple("set_mute", false, "mute must be bool");
+      return true;
+    }
     bool now;
-    if (j_mute == NULL || !cJSON_IsBool(j_mute)) {
+    if (j_mute == NULL) {
       now = pipecat_mic_mute_toggle();
     } else {
       now = pipecat_mic_mute_set(cJSON_IsTrue(j_mute));
@@ -315,7 +364,7 @@ static bool cmd_dispatch(const cJSON *msg) {
      * set_name crash; repeated by the first 1.2.11 build, 2026-10-16). The
      * mute itself already applied above; a failed save only costs
      * persistence, and says so in the log. */
-    if (nvs_run(2, now ? "1" : NULL, NULL) != 0) {
+    if (nvs_run(2, NULL, NULL) != 0) {
       ESP_LOGW(TAG, "set_mute: applied but NOT saved (nvs error)");
     }
     char reply[160];
@@ -361,6 +410,12 @@ static bool cmd_dispatch(const cJSON *msg) {
     const cJSON *j_pass = cJSON_GetObjectItem(msg, "pass");
     if (!cJSON_IsString(j_ssid) || !cJSON_IsString(j_pass) || !j_ssid->valuestring[0]) {
       cmd_send_simple("set_wifi", false, "missing ssid/pass");
+    } else if (strlen(j_ssid->valuestring) > 32) {
+      /* 802.11 caps a network name at 32 BYTES (a UTF-8 name can hit that
+       * in fewer characters). A longer one would be stored, then fail to
+       * load at the next boot, and the trial would burn three boots before
+       * rolling back. */
+      cmd_send_simple("set_wifi", false, "network name must be at most 32 bytes");
     } else if (!wifi_pass_acceptable(j_pass->valuestring)) {
       cmd_send_simple("set_wifi", false, "password must be up to 63 characters, or 64 hex digits");
     } else if (pipecat_ota_busy()) {

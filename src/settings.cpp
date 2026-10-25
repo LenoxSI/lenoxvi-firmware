@@ -17,6 +17,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <esp_memory_utils.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "wifi_trial.h"
 #include "nvs_str.h"
 
@@ -36,6 +38,13 @@ static char g_node_name[NODE_NAME_MAX] = "";
 static char g_wifi_ssid[WIFI_SSID_MAX] = "";
 static char g_wifi_pass[WIFI_PASS_MAX] = "";
 static bool g_muted = false;
+/* set_mute (nvs_write task) and the array's button (mute task) both save
+ * the mute state; one at a time, so the check and the write can't
+ * interleave. Created in settings_load, before either task exists. */
+static StaticSemaphore_t g_muted_lock_buf;
+static SemaphoreHandle_t g_muted_lock = NULL;
+/* settings_hostname()'s result: the node name made DHCP/DNS-safe. */
+static char g_hostname[NODE_NAME_MAX] = "";
 
 #ifndef PIPECAT_ROOM
 #define PIPECAT_ROOM "node"
@@ -94,41 +103,18 @@ int settings_set_node_name(const char *name) {
   if (err == ESP_OK) {
     strlcpy(g_node_name, trimmed, sizeof(g_node_name));
     /* Hostname follows the name — UniFi shows the real node name. */
+    const char *hn = settings_hostname();
     esp_netif_t *sta = NULL;
-    while ((sta = esp_netif_next(sta)) != NULL) {
-      esp_netif_set_hostname(sta, settings_hostname());
+    while (hn[0] && (sta = esp_netif_next(sta)) != NULL) {
+      esp_netif_set_hostname(sta, hn);
     }
     ESP_LOGI(TAG, "node name set: '%s' (hostname follows)", trimmed);
   }
   return err;
 }
 
-int settings_set_wifi(const char *ssid, const char *password) {
-  if (stack_in_psram("set_wifi")) return -ESP_ERR_INVALID_STATE;
-  nvs_handle_t h;
-  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
-  if (err != ESP_OK) return err;
-  if (ssid && ssid[0]) {
-    err = nvs_set_str(h, KEY_SSID, ssid);
-    if (err == ESP_OK && password && password[0]) {
-      err = nvs_set_str(h, KEY_PASS, password);
-    }
-  }
-  if (err == ESP_OK) err = nvs_commit(h);
-  nvs_close(h);
-  if (err == ESP_OK) {
-    if (ssid && ssid[0]) {
-      strlcpy(g_wifi_ssid, ssid, sizeof(g_wifi_ssid));
-      if (password && password[0]) {
-        strlcpy(g_wifi_pass, password, sizeof(g_wifi_pass));
-      }
-    }
-    ESP_LOGI(TAG, "wifi creds stored (apply: reconnect or reboot)");
-  }
-  return err;
-}
-
 bool settings_load(void) {
+  g_muted_lock = xSemaphoreCreateMutexStatic(&g_muted_lock_buf);
   nvs_handle_t h;
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
   if (err != ESP_OK) {
@@ -161,18 +147,25 @@ bool settings_get_muted(void) { return g_muted; }
 int settings_set_muted(bool muted) {
   if (muted == g_muted) return 0;   /* no flash write for a no-op */
   if (stack_in_psram("set_muted")) return -ESP_ERR_INVALID_STATE;
+  if (g_muted_lock) xSemaphoreTake(g_muted_lock, portMAX_DELAY);
+  if (muted == g_muted) {           /* the other saver just stored it */
+    if (g_muted_lock) xSemaphoreGive(g_muted_lock);
+    return 0;
+  }
   nvs_handle_t h;
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
-  if (err != ESP_OK) return -err;
-  err = nvs_set_u8(h, KEY_MUTED, muted ? 1 : 0);
-  if (err == ESP_OK) err = nvs_commit(h);
-  nvs_close(h);
+  if (err == ESP_OK) {
+    err = nvs_set_u8(h, KEY_MUTED, muted ? 1 : 0);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+  }
   if (err == ESP_OK) {
     g_muted = muted;
     ESP_LOGI(TAG, "mute state stored: %s", muted ? "muted" : "unmuted");
   } else {
     ESP_LOGW(TAG, "mute state NOT stored: %s", esp_err_to_name(err));
   }
+  if (g_muted_lock) xSemaphoreGive(g_muted_lock);
   return err == ESP_OK ? 0 : -err;
 }
 
@@ -180,7 +173,22 @@ const char *settings_get_node_name(void) { return g_node_name; }
 const char *settings_get_wifi_ssid(void) { return g_wifi_ssid; }
 const char *settings_get_wifi_pass(void) { return g_wifi_pass; }
 
-const char *settings_hostname(void) { return g_node_name; }
+/* DHCP/DNS hostnames allow only a-z, 0-9 and '-' (RFC 1123), no leading or
+ * trailing '-', at most 63 characters. Node names may hold '_' or capitals,
+ * which some routers reject (the node then shows as "espressif" or not at
+ * all), so the hostname is a cleaned copy; the node name itself is kept. */
+const char *settings_hostname(void) {
+  size_t n = 0;
+  for (const char *p = g_node_name; *p && n < sizeof(g_hostname) - 1 && n < 63; p++) {
+    char c = (char)tolower((unsigned char)*p);
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) c = '-';
+    if (c == '-' && n == 0) continue;   /* no leading '-' */
+    g_hostname[n++] = c;
+  }
+  while (n > 0 && g_hostname[n - 1] == '-') n--;   /* no trailing '-' */
+  g_hostname[n] = '\0';
+  return g_hostname;
+}
 /* ── Wi-Fi change trial (M1, 1.2.23) ────────────────────────────────── */
 static bool g_wifi_trial_pending = false;
 /* This boot restored the previous network after a failed trial (1.2.35):

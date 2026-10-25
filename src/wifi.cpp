@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "main.h"
+#include "cmd_json.h"
 #include "boot_diag.h"
 #include "rgb.h"
 #include "settings.h"
@@ -55,13 +56,25 @@ void pipecat_start_webrtc() {
  * network, bot unreachable, UDP blocked) = reboot: the next boot counts the
  * next attempt, and after the last one the old network returns. */
 #define WIFI_TRIAL_TIMEOUT_MS 90000
+/* A wrong password shows up as an auth/handshake failure within seconds, so
+ * waiting out the full timeout only delays the rollback. This many in a row
+ * (no got-ip between them) ends the attempt early. NO_AP_FOUND isn't counted:
+ * a far or rebooting AP produces it too. */
+#define WIFI_TRIAL_AUTHFAIL_MAX 3
 static volatile bool g_bot_reached = false;
+static volatile int s_trial_authfails = 0;  /* written by the event handler only */
 
 void pipecat_wifi_bot_reached(void) { g_bot_reached = true; }
 
 static void wifi_trial_task(void *arg) {
   const TickType_t start = xTaskGetTickCount();
   while (!g_bot_reached) {
+    if (s_trial_authfails >= WIFI_TRIAL_AUTHFAIL_MAX && !pipecat_ota_busy()) {
+      ESP_LOGE(LOG_TAG, "wifi trial: the network refused the credentials %d times in a "
+               "row — rebooting (next attempt)", WIFI_TRIAL_AUTHFAIL_MAX);
+      vTaskDelay(pdMS_TO_TICKS(200));
+      boot_diag_restart("wifi-trial-authfail");
+    }
     if (xTaskGetTickCount() - start >= pdMS_TO_TICKS(WIFI_TRIAL_TIMEOUT_MS)) {
       if (pipecat_ota_busy()) {           /* never reboot under a flash write */
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -98,6 +111,25 @@ void pipecat_wifi_trial_start(void) {
  * HTTP, OTA) for the whole AP outage. The callback runs on the esp_timer
  * task (small stack), so it only kicks the driver. */
 static esp_timer_handle_t s_reconnect_timer = NULL;
+
+/* Link history for get_info: how many times the station dropped since boot
+ * and the driver's reason for the last one (wifi_err_reason_t, 0 = none
+ * yet), so the dashboard can tell a wrong password from a weak signal.
+ * Written only by the event handler; plain int reads elsewhere. */
+static volatile int s_last_disc_reason = 0;
+static volatile uint32_t s_disconnects = 0;
+
+extern "C" void pipecat_wifi_link_stats(cmd_link_stats_t *out) {
+  out->last_reason = s_last_disc_reason;
+  out->disconnects = s_disconnects;
+}
+
+static bool wifi_reason_is_auth_fail(int reason) {
+  return reason == WIFI_REASON_AUTH_FAIL ||
+         reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+         reason == WIFI_REASON_HANDSHAKE_TIMEOUT ||
+         reason == WIFI_REASON_AUTH_EXPIRE;
+}
 
 static void wifi_reconnect_timer_cb(void *arg) {
   esp_err_t err = esp_wifi_connect();
@@ -136,6 +168,11 @@ static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
   if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
     wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)event_data;
     ESP_LOGW(LOG_TAG, "disconnected reason: %d", d->reason);
+    s_last_disc_reason = d->reason;
+    s_disconnects = s_disconnects + 1;
+    if (settings_wifi_trial_pending()) {  /* the trial task acts on it */
+      s_trial_authfails = wifi_reason_is_auth_fail(d->reason) ? s_trial_authfails + 1 : 0;
+    }
     rgb_set_state(RGB_STATE_WIFI_CONNECTING);
     /* 023 fix (2026-09-29): the old 5-strike counter gave up for the
      * whole boot after a ~30s body-block — infinite retries with
@@ -155,6 +192,7 @@ static void pipecat_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(LOG_TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
     g_wifi_connected = true;
     s_retry_num = 0;  // reset retry counter on successful connection
+    s_trial_authfails = 0;  // the network took the credentials
     if (s_reconnect_timer) esp_timer_stop(s_reconnect_timer);  // no stale retry
     rgb_set_state(RGB_STATE_WIFI_UP);
     // OTA check does NOT run here (empirical bisect 2026-09-19): the same

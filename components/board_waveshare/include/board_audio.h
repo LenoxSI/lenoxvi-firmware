@@ -10,6 +10,9 @@ extern "C" {
  * silence if a mic step fails; a speaker failure only leaves the speaker
  * dead (board_audio_speaker_ok() false, PA off) and still returns ESP_OK. */
 esp_err_t board_audio_init(void);
+/* The mic step board_audio_init failed at (a fixed string, e.g.
+ * "es7210_codec_new"), or NULL if it didn't fail. */
+const char *board_audio_init_failed_step(void);
 /* Fill `out` with exactly `n` mono int16 samples at 16 kHz (blocking, ~20 ms
  * for n=320). Returns true if real audio, false if silence was substituted. */
 bool board_audio_read(int16_t *out, int n);

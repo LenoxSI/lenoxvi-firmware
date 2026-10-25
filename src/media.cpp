@@ -31,6 +31,7 @@
 #include "esp_timer.h"
 #include "cmd_json.h"
 #include "settings.h"
+#include "boot_diag.h"
 #if LENOXVI_BOARD_WAVESHARE  /* waveshare: no XVF — mic comes from the board component */
 #include "board_audio.h"
 #endif
@@ -278,6 +279,26 @@ static bool on_mic_queue_overflow(i2s_chan_handle_t, i2s_event_data_t *, void *)
 }
 #endif
 
+/* Audio init result for get_info (audio.init): NULL while every step has
+ * succeeded, else the first step that failed, as a fixed string. Written
+ * during init only (the first failure wins); read by the cmd task. */
+static const char *volatile s_audio_init_failed = NULL;
+static void audio_init_failed(const char *step) {
+  if (s_audio_init_failed == NULL) s_audio_init_failed = step;
+}
+/* An init allocation failed. A heap this short at session start is better
+ * retried from a clean boot than run with a NULL buffer the audio path would
+ * crash on later, so record it and reboot with a tag. */
+[[noreturn]] static void audio_init_oom(const char *step) {
+  audio_init_failed(step);
+  ESP_LOGE(LOG_TAG, "audio init: %s failed (out of memory) — rebooting", step);
+  boot_diag_restart("audio-oom");
+}
+extern "C" const char *pipecat_audio_init_status(void) {
+  const char *f = s_audio_init_failed;
+  return f ? f : "ok";
+}
+
 extern "C" void pipecat_audio_stats(cmd_audio_stats_t *out) {
   out->core = s_au_core;
   out->frames = s_au_frames;
@@ -285,6 +306,7 @@ extern "C" void pipecat_audio_stats(cmd_audio_stats_t *out) {
   out->max_work_us = s_au_max_work_us;
   out->max_gap_us = s_au_max_gap_us;
   out->zero_s = s_au_zero_s;
+  out->init = pipecat_audio_init_status();
   s_au_max_work_us = 0;      /* worst cases are per read window */
   s_au_max_gap_us = 0;
 }
@@ -297,8 +319,11 @@ void pipecat_init_i2c_early() {}
  * aborts: on failure board_audio_read() keeps delivering silence. */
 void pipecat_init_audio_capture() {
     esp_err_t err = board_audio_init();
-    if (err != ESP_OK)
+    if (err != ESP_OK) {
         ESP_LOGE(LOG_TAG, "board_audio_init: %s — mic sends silence", esp_err_to_name(err));
+        const char *step = board_audio_init_failed_step();
+        audio_init_failed(step ? step : "codec-init");
+    }
 }
 #else
 #if LENOXVI_BOARD_ARRAY
@@ -407,6 +432,11 @@ static void mute_task(void *arg) {
             ESP_LOGI(LOG_TAG, "mute: physical button -> %s", m ? "MUTED" : "unmuted");
         } else {                  /* release: make the pin agree with us now */
             mute_hw_dirty.store(true);
+            /* ...and NVS: a dashboard set_mute racing the press could have
+             * saved its value before ours or after, so the stored state may
+             * be the older one. Re-save if it differs. */
+            bool m = mic_mute.load();
+            if (settings_get_muted() != m) settings_set_muted(m);
         }
     }
 }
@@ -565,6 +595,16 @@ void pipecat_init_i2c_early() {
     }
 }
 
+/* An I2S step failed. Used to abort (panic, then the same failure every
+ * boot). Now the node stays up without mic audio and get_info says why
+ * (audio.init "i2s-init"); the audio loop sees rx_chan NULL and idles. */
+static void i2s_init_failed(const char *what, esp_err_t err) {
+    ESP_LOGE(LOG_TAG, "%s: %s — no mic audio", what, esp_err_to_name(err));
+    audio_init_failed("i2s-init");
+    if (tx_chan) { i2s_channel_disable(tx_chan); i2s_del_channel(tx_chan); tx_chan = NULL; }
+    if (rx_chan) { i2s_channel_disable(rx_chan); i2s_del_channel(rx_chan); rx_chan = NULL; }
+}
+
 void pipecat_init_audio_capture() {
     /* I2C bus + XVF probe were done EARLY (pipecat_init_i2c_early, before
      * WiFi) so the LED ring can reach the XMOS during boot states. Audio
@@ -572,6 +612,7 @@ void pipecat_init_audio_capture() {
      * failed, there is nothing to capture — bail loudly. */
     if (xvf3800 == NULL) {
         ESP_LOGE(LOG_TAG, "XVF3800 absent — audio init aborted (early probe failed?)");
+        audio_init_failed("xvf-absent");
         return;
     }
 
@@ -601,7 +642,8 @@ void pipecat_init_audio_capture() {
     chan_cfg.auto_clear_after_cb = true;
     chan_cfg.auto_clear_before_cb = false;
     chan_cfg.intr_priority = 0;
-    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_chan, &rx_chan));
+    esp_err_t err = i2s_new_channel(&chan_cfg, &tx_chan, &rx_chan);
+    if (err != ESP_OK) { i2s_init_failed("i2s_new_channel", err); return; }
 
     /* Budget print: how much DMA-capable (internal) RAM is left at audio-init */
     ESP_LOGI(LOG_TAG, "pre-I2S DMA heap: free=%u largest=%u",
@@ -627,8 +669,9 @@ void pipecat_init_audio_capture() {
     std_cfg.gpio_cfg.ws   = I2S_LRCK_PIN;
     std_cfg.gpio_cfg.dout = I2S_DOUT_PIN;
     std_cfg.gpio_cfg.din  = I2S_DIN_PIN;
-    ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_chan, &std_cfg));
-    ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_chan, &std_cfg));
+    err = i2s_channel_init_std_mode(tx_chan, &std_cfg);
+    if (err == ESP_OK) err = i2s_channel_init_std_mode(rx_chan, &std_cfg);
+    if (err != ESP_OK) { i2s_init_failed("i2s_channel_init_std_mode", err); return; }
     /* Audio-loop health: count mic DMA overflows (lost audio). Registered
      * in the READY state, before enable.
      * A registration failure only loses the counter, never audio. */
@@ -637,8 +680,9 @@ void pipecat_init_audio_capture() {
     if (i2s_channel_register_event_callback(rx_chan, &mic_cbs, NULL) != ESP_OK) {
         ESP_LOGW(LOG_TAG, "mic overflow counter not registered (audio unaffected)");
     }
-    ESP_ERROR_CHECK(i2s_channel_enable(tx_chan));
-    ESP_ERROR_CHECK(i2s_channel_enable(rx_chan));
+    err = i2s_channel_enable(tx_chan);
+    if (err == ESP_OK) err = i2s_channel_enable(rx_chan);
+    if (err != ESP_OK) { i2s_init_failed("i2s_channel_enable", err); return; }
 
 #if LENOXVI_BOARD_FLEX
     ESP_LOGI(LOG_TAG, "Audio ready: FLEX XVF3800 I2S MASTER (inthost v1.0.7 image), ESP32 slave @ %d Hz", XVF_NATIVE_RATE);
@@ -675,14 +719,22 @@ void pipecat_init_audio_capture() {
 #endif
 
 /* ── Opus decoder — incoming bot audio (decoded for turn-lock only) ─────── */
+/* Room for the longest Opus packet (120 ms @ 16 kHz). Today's packets are
+ * 20 ms, but a longer ptime would otherwise fail every decode with
+ * OPUS_BUFFER_TOO_SMALL: no turn lock, and silence on the waveshare speaker. */
+#define OPUS_MAX_DECODE_SAMPLES  1920
 static opus_int16 *decoder_buffer = NULL;
 static OpusDecoder *opus_decoder  = NULL;
 
 void pipecat_init_audio_decoder() {
     int err;
     opus_decoder = opus_decoder_create(SAMPLE_RATE, 1, &err);
-    if (err != OPUS_OK) { ESP_LOGE(LOG_TAG, "opus_decoder_create: %d", err); return; }
-    decoder_buffer = (opus_int16 *)malloc(PCM_MONO_SAMPLES * sizeof(opus_int16));
+    if (err != OPUS_OK || opus_decoder == NULL) {
+        ESP_LOGE(LOG_TAG, "opus_decoder_create: %d", err);
+        audio_init_oom("decoder-alloc");
+    }
+    decoder_buffer = (opus_int16 *)malloc(OPUS_MAX_DECODE_SAMPLES * sizeof(opus_int16));
+    if (decoder_buffer == NULL) audio_init_oom("decoder-alloc");
 }
 
 void pipecat_audio_decode(uint8_t *data, size_t size) {
@@ -697,7 +749,14 @@ void pipecat_audio_decode(uint8_t *data, size_t size) {
      * peaks, wire showed 7-byte silence). Only decode real speech-sized
      * frames — tiny ones are silence by definition. */
     if (size <= 3) { is_playing = false; return; }
-    int n = opus_decode(opus_decoder, data, size, decoder_buffer, PCM_MONO_SAMPLES, 0);
+    int n = opus_decode(opus_decoder, data, size, decoder_buffer, OPUS_MAX_DECODE_SAMPLES, 0);
+    if (n < 0) {
+        /* Throttled: bad packets can arrive 50 times a second. */
+        static uint32_t dec_errs = 0;
+        if (dec_errs++ % 500 == 0)
+            ESP_LOGW(LOG_TAG, "opus_decode: %s (%lu errors so far)",
+                     opus_strerror(n), (unsigned long)dec_errs);
+    }
     if (n <= 0) return;
     update_is_playing(decoder_buffer, n); LENOXVI_SPEAKER_PLAY(decoder_buffer, n);  /* waveshare: built-in speaker */
 }
@@ -713,15 +772,21 @@ static int16_t     *mic_mono16            = NULL;
 void pipecat_init_audio_encoder() {
     int err;
     opus_encoder = opus_encoder_create(SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP, &err);
-    if (err != OPUS_OK) { ESP_LOGE(LOG_TAG, "opus_encoder_create: %d", err); return; }
+    if (err != OPUS_OK || opus_encoder == NULL) {
+        ESP_LOGE(LOG_TAG, "opus_encoder_create: %d", err);
+        audio_init_oom("encoder-alloc");
+    }
     opus_encoder_ctl(opus_encoder, OPUS_SET_BITRATE(OPUS_ENCODER_BITRATE));
     opus_encoder_ctl(opus_encoder, OPUS_SET_COMPLEXITY(OPUS_ENCODER_COMPLEXITY));
     opus_encoder_ctl(opus_encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
 #if !LENOXVI_BOARD_WAVESHARE  /* waveshare: skip the unused ~7.6 KB 48k buffer */
     mic_stereo48          = (int32_t *)heap_caps_malloc(HW48_STEREO32_BYTES, MALLOC_CAP_DEFAULT);
+    if (mic_stereo48 == NULL) audio_init_oom("mic-alloc");
 #endif
     mic_mono16            = (int16_t *)malloc(PCM_MONO_BYTES);
+    if (mic_mono16 == NULL) audio_init_oom("mic-alloc");
     encoder_output_buffer = (uint8_t *)malloc(OPUS_BUFFER_SIZE);
+    if (encoder_output_buffer == NULL) audio_init_oom("encoder-alloc");
 }
 
 void pipecat_send_audio(PeerConnection *peer_connection) {
@@ -742,6 +807,19 @@ void pipecat_send_audio(PeerConnection *peer_connection) {
     /* 48k bus: 20ms = 960 stereo32 frames (7680B). The 16k image fills one
      * frame in three; the read path below is phase-independent. */
     if (mic_stereo48 == NULL) return;
+    if (rx_chan == NULL) {
+        /* No mic bus (XVF absent or I2S init failed; get_info audio.init says
+         * which). Reads would fail at once, so say it once a minute rather
+         * than every pass, and pace the loop instead of spinning. */
+        static int64_t last_log_us = -60000000;
+        int64_t now = esp_timer_get_time();
+        if (now - last_log_us >= 60000000) {
+            ESP_LOGE(LOG_TAG, "no mic audio: audio init failed (%s)", pipecat_audio_init_status());
+            last_log_us = now;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+        return;
+    }
     esp_err_t rc = i2s_channel_read(rx_chan, mic_stereo48, HW48_STEREO32_BYTES,
                                     &bytes_read, pdMS_TO_TICKS(I2S_READ_TIMEOUT_MS));
     if (rc != ESP_OK) {
