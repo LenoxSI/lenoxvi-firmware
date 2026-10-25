@@ -38,6 +38,7 @@ typedef struct cmd_audio_stats_t {
   uint32_t max_work_us;  /* worst decimate + encode + send, since last read */
   uint32_t max_gap_us;   /* worst gap between frame reads, since last read */
   uint32_t zero_s;       /* seconds of all-zero mic audio while not muted, since boot */
+  const char *init;      /* audio init result: "ok" or the step that failed; NULL = omitted */
 } cmd_audio_stats_t;
 
 /* STUN keepalive counters since boot (1.2.36, libpeer patch 0004):
@@ -49,6 +50,20 @@ typedef struct cmd_ka_stats_t {
   uint32_t rescued;
 } cmd_ka_stats_t;
 
+/* Wi-Fi link history since boot: the last STA disconnect reason (ESP-IDF
+ * wifi_err_reason_t, 0 = none yet) and how many disconnects happened. */
+typedef struct cmd_link_stats_t {
+  int last_reason;
+  uint32_t disconnects;
+} cmd_link_stats_t;
+/* Last OTA outcome this boot. last is a short fixed tag ("none" = no check
+ * yet; see ota.cpp for the set), http the last HTTP status seen by the check
+ * or download (0 = none), at_s the uptime when it was recorded. */
+typedef struct cmd_ota_status_t {
+  const char *last;
+  int http;
+  uint32_t at_s;
+} cmd_ota_status_t;
 /* Reboot black box (1.2.29): why the previous boot ended, plus link
  * quality — see boot_diag.h for the meaning of each field. */
 typedef struct cmd_boot_info_t {
@@ -58,12 +73,15 @@ typedef struct cmd_boot_info_t {
   uint32_t up_s;        /* uptime of this boot, seconds */
   int rssi;             /* Wi-Fi signal, dBm; 0 = not associated (-> null) */
   const cmd_ka_stats_t *ka;  /* keepalive counters -> "wifi":{"ka"}; NULL = omitted */
+  const cmd_link_stats_t *link;  /* -> "wifi":{"last_reason","disconnects"}; NULL = omitted */
+  const cmd_ota_status_t *ota;   /* -> "ota":{"last","http","at_s"}; NULL = omitted */
 } cmd_boot_info_t;
 
 /* {...,"cmd":"get_info","ok":true,"data":{"name","mac","fw","line","muted",
  *  "mute_hw":{"btn"},"audio":{"core","frames","ovf","max_work_ms",
  *  "max_gap_ms"},"boot":{"reason","why","prev_up_s","up_s"},
- *  "wifi":{"rssi","ka":{"sent","resent","rescued"}}}} — mac is the 6 raw
+ *  "wifi":{"rssi","ka":{"sent","resent","rescued"},"last_reason","disconnects"},
+ *  "ota":{"last","http","at_s"}}} — audio.init rides in "audio"; mac is the 6 raw
  *  bytes, printed as 12 hex chars; "ka" is omitted when boot->ka is NULL;
  *  "audio" is omitted when audio is NULL, "boot" + "wifi" when boot is. */
 char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,

@@ -23,6 +23,7 @@ typedef enum {
     RGB_STATE_PROCESSING,         // STT/LLM
     RGB_STATE_SPEAKING,           // TTS
     RGB_STATE_ERROR,
+    RGB_STATE_UPDATING,          // firmware download/flash in progress
     RGB_STATE_BOOT,              // highest — shows briefly on start
 } rgb_state_t;
 

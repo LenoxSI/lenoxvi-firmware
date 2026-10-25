@@ -121,6 +121,14 @@ char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
       cJSON_Delete(root);
       return NULL;
     }
+    if (audio->init) {
+      char safe_init[24];
+      cmd_json_utf8_sanitize(audio->init, safe_init, sizeof(safe_init));
+      if (!cJSON_AddStringToObject(au, "init", safe_init)) {
+        cJSON_Delete(root);
+        return NULL;
+      }
+    }
   }
   if (boot) {
     char safe_reason[16], safe_why[24];
@@ -144,6 +152,26 @@ char *cmd_json_info(const char *name, const uint8_t mac[6], const char *fw,
           || !cJSON_AddNumberToObject(ka, "sent", (double)boot->ka->sent)
           || !cJSON_AddNumberToObject(ka, "resent", (double)boot->ka->resent)
           || !cJSON_AddNumberToObject(ka, "rescued", (double)boot->ka->rescued)) {
+        cJSON_Delete(root);
+        return NULL;
+      }
+    }
+    if (boot->link) {
+      if (!cJSON_AddNumberToObject(wf, "last_reason", boot->link->last_reason)
+          || !cJSON_AddNumberToObject(wf, "disconnects", (double)boot->link->disconnects)) {
+        cJSON_Delete(root);
+        return NULL;
+      }
+    }
+    if (boot->ota) {
+      char safe_last[24];
+      cmd_json_utf8_sanitize(boot->ota->last ? boot->ota->last : "", safe_last, sizeof(safe_last));
+      cJSON *ot = cJSON_AddObjectToObject(data, "ota");
+      if (!ot
+          || !cJSON_AddStringToObject(ot, "last", safe_last)
+          || !(boot->ota->http ? cJSON_AddNumberToObject(ot, "http", boot->ota->http)
+                               : cJSON_AddNullToObject(ot, "http"))
+          || !cJSON_AddNumberToObject(ot, "at_s", (double)boot->ota->at_s)) {
         cJSON_Delete(root);
         return NULL;
       }

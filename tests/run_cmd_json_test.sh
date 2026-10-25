@@ -93,6 +93,24 @@ check("info ka: keepalive counters in the wifi block, uint32 exact",
 check("info ka: boot block unchanged beside it",
       d.get("boot") == {"reason": "sw", "why": "ota-success", "prev_up_s": 106, "up_s": 34}, d.get("boot"))
 check("info ka: absent when not given (older callers)", "ka" not in J("info_boot_panic")["data"]["wifi"], J("info_boot_panic")["data"])
+d = J("info_link_ota")["data"]
+check("info link: last disconnect reason + count in the wifi block, uint32 exact",
+      d.get("wifi") == {"rssi": -40, "ka": {"sent": 4294967295, "resent": 12, "rescued": 3},
+                        "last_reason": 201, "disconnects": 4294967295}, d.get("wifi"))
+check("info ota: last outcome, http status, uptime stamp",
+      d.get("ota") == {"last": "http-404", "http": 404, "at_s": 61}, d.get("ota"))
+check("info audio: init result rides in the audio block", d.get("audio", {}).get("init") == "ok", d.get("audio"))
+d = J("info_link_none")["data"]
+check("info link/ota: nothing yet -> zeros, http null", d.get("wifi") == {"rssi": -40, "last_reason": 0, "disconnects": 0}
+      and d.get("ota") == {"last": "none", "http": None, "at_s": 0}, d)
+check("info link/ota: absent when not given (older callers)",
+      "ota" not in J("info_boot_panic")["data"] and "last_reason" not in J("info_boot_panic")["data"]["wifi"]
+      and "init" not in J("info_audio")["data"]["audio"], J("info_boot_panic")["data"])
+d = J("info_hostile_tags")["data"]
+check("info ota/init: hostile tags are DATA (no injected keys), cut to buffer",
+      set(d["ota"]) == {"last", "http", "at_s"} and "y" not in d and "x" not in d["audio"]
+      and d["ota"]["last"].startswith('bad","y":2') and len(d["ota"]["last"]) == 23
+      and d["audio"]["init"].startswith('i2s","x":1') and len(d["audio"]["init"]) == 23, d)
 d = J("scan_mixed")["data"]
 check("scan: forging SSID is one key, no injected key",
       'a","injected":1,"b' in d and "injected" not in d and d['a","injected":1,"b'] == -55, d)

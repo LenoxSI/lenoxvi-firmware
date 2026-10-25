@@ -35,7 +35,13 @@ static const char *TAG = "rgb";
  *   PROCESSING      → breathing, cyan      (STT/LLM work)
  *   SPEAKING        → solid, cyan          (TTS out the Sonos)
  *   ERROR           → breathing, red
- *   DARK            → off */
+ *   UPDATING        → breathing, green     (firmware download/flash: the one
+ *                                           colour no other state uses, so
+ *                                           "don't unplug me" can't be read
+ *                                           as an error or as listening)
+ *   DARK            → off
+ * The waveshare WS2812 ring (board_led.c) renders the same table with the
+ * same breathing effect. */
 
 typedef struct {
     uint8_t effect;   /* GPO cmd 12 value */
@@ -82,6 +88,7 @@ static const led_effect_t *effect_for(rgb_state_t s) {
     static const led_effect_t EFF_PROCESSING = {1, 255, 0x00FFFF};
     static const led_effect_t EFF_SPEAKING   = {3, 255, 0x00FFFF};
     static const led_effect_t EFF_ERROR      = {1, 255, 0xFF0000};
+    static const led_effect_t EFF_UPDATING   = {1, 255, 0x00FF00};
     static const led_effect_t EFF_DARK       = {0,   0, 0x000000};
     switch (s) {
         case RGB_STATE_BOOT:            return &EFF_BOOT;
@@ -92,6 +99,7 @@ static const led_effect_t *effect_for(rgb_state_t s) {
         case RGB_STATE_PROCESSING:       return &EFF_PROCESSING;
         case RGB_STATE_SPEAKING:        return &EFF_SPEAKING;
         case RGB_STATE_ERROR:           return &EFF_ERROR;
+        case RGB_STATE_UPDATING:        return &EFF_UPDATING;
         default:                        return &EFF_DARK;
     }
 }
@@ -99,19 +107,6 @@ static const led_effect_t *effect_for(rgb_state_t s) {
 // ── Shared state ──────────────────────────────────────────────
 static volatile rgb_state_t current_state = RGB_STATE_BOOT;
 static volatile rgb_state_t rendered_state = RGB_STATE_DARK;
-
-// ── State priority ───────────────────────────────────────────
-// Higher enum value = higher priority. We only switch to a new
-// state if it's >= current (error always wins, boot always wins).
-// Exception: BOOT is one-shot and drops to the next state after.
-
-static bool should_switch(rgb_state_t proposed) {
-    if (rendered_state == RGB_STATE_BOOT && proposed != RGB_STATE_BOOT)
-        return true;
-    if (proposed == RGB_STATE_DARK || proposed == RGB_STATE_BRIDGE_CONNECTED)
-        return true;
-    return proposed >= current_state;
-}
 
 #if !LENOXVI_BOARD_WAVESHARE  /* waveshare: its own render task below (no XVF bus) */
 // ── Render task ──────────────────────────────────────────────
@@ -135,10 +130,6 @@ static void rgb_task(void *arg) {
         rgb_state_t s = current_state;
 
         if (s != rendered_state) {
-            if (!should_switch(s)) {
-                vTaskDelay(pdMS_TO_TICKS(100));
-                continue;
-            }
             const led_effect_t *eff = effect_for(s);
             /* Push all three registers; effect order matters (color/bright first
              * so an effect change applies with them in place). */
@@ -186,7 +177,7 @@ void rgb_init(void) {
 }
 #else
 // ── Render task (waveshare) ──────────────────────────────────
-// Same cadence and switch rule as the array's rgb_task; the WS2812 ring is
+// Same cadence as the array's rgb_task; the WS2812 ring is
 // up at boot (RMT), so there is no bus wait and nothing to retry. The mute
 // state is polled here and shown on pixel 0 (the array's red mute LED).
 
@@ -196,10 +187,6 @@ static void rgb_task(void *arg) {
         rgb_state_t s = current_state;
 
         if (s != rendered_state) {
-            if (!should_switch(s)) {
-                vTaskDelay(pdMS_TO_TICKS(100));
-                continue;
-            }
             const led_effect_t *eff = effect_for(s);
             board_led_set(eff->effect, eff->brightness, eff->color);
             rendered_state = s;
@@ -223,7 +210,19 @@ void rgb_init(void) {
 }
 #endif
 
+/* ERROR and UPDATING stick: once shown, a lower state can't replace them
+ * until a new session is up (BRIDGE_CONNECTED, which the OTA path also uses
+ * to clear UPDATING after a failed update) or the node reboots. Without this
+ * a late bot-stopped-speaking painted a dropped session purple, and a Wi-Fi
+ * blip hid an update in progress. Everything else: the newest state wins.
+ * One read and one enum write, so any task or ISR may call it. Two callers
+ * racing on different cores can still let a lower state overwrite a sticky
+ * one in that instant; that only affects the LED, never the node. */
 void rgb_set_state(rgb_state_t new_state) {
+    rgb_state_t cur = current_state;
+    if ((cur == RGB_STATE_ERROR || cur == RGB_STATE_UPDATING) &&
+        new_state < cur && new_state != RGB_STATE_BRIDGE_CONNECTED)
+        return;
     current_state = new_state;
 }
 

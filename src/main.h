@@ -6,6 +6,11 @@
 #define TICK_INTERVAL 15
 
 // Wifi
+struct cmd_link_stats_t;
+struct cmd_ota_status_t;
+extern "C" void pipecat_wifi_link_stats(struct cmd_link_stats_t *out);  /* wifi.cpp: last disconnect reason + count */
+extern "C" void pipecat_ota_status(struct cmd_ota_status_t *out);       /* ota.cpp: last OTA outcome this boot */
+extern "C" const char *pipecat_audio_init_status(void);                 /* media.cpp: "ok" or the failed init step */
 extern void pipecat_init_wifi();
 extern void pipecat_wifi_bot_reached(void);   /* first bot message over the data channel (flag only — any task) */
 extern void pipecat_wifi_trial_start(void);   /* M1: start the trial watcher if a trial is pending */
