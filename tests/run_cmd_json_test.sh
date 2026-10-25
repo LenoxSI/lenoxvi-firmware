@@ -121,6 +121,14 @@ d = J("info_dsp_round")["data"]["audio"]
 check("info dsp: mic gain rounded to 0.1", d.get("dsp", {}).get("mic_gain") == 55.0 and d["dsp"]["ver"] == "1.0.8", d)
 check("info dsp: absent when the profile never ran (waveshare, older callers)",
       "dsp" not in J("info_link_ota")["data"]["audio"] and "dsp" not in J("info_audio")["data"]["audio"], J("info_link_ota")["data"])
+d = J("info_btn")["data"]
+check("info btn: raw reply as 8 hex digits + rejected all-zero count (uint32 exact) in mute_hw",
+      d.get("mute_hw") == {"btn": -3, "raw": "0000ff01", "zero": 4294967295}, d.get("mute_hw"))
+d = J("info_btn_unseen")["data"]
+check("info btn: no real reply yet -> raw null", d.get("mute_hw") == {"btn": -1, "raw": None, "zero": 3}, d.get("mute_hw"))
+check("info btn: absent off the array (btn_diag false) and for older callers",
+      J("info_dsp")["data"]["mute_hw"] == {"btn": -1} and J("info_plain")["data"]["mute_hw"] == {"btn": J("info_plain")["data"]["mute_hw"]["btn"]},
+      J("info_dsp")["data"]["mute_hw"])
 d = J("scan_mixed")["data"]
 check("scan: forging SSID is one key, no injected key",
       'a","injected":1,"b' in d and "injected" not in d and d['a","injected":1,"b'] == -55, d)

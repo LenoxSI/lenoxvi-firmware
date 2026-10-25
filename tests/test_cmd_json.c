@@ -30,9 +30,9 @@ int main(void) {
   emit("info_hostile", cmd_json_info("x\",\"muted\":false,\"y\":\"", mac, "1.2.20", "flex", false, -2, NULL, NULL));
   /* audio-loop health (1.2.27): lifetime counters near uint32 max must
    * stay exact (a double holds 2^53), ms rounds DOWN to 0.1 */
-  const cmd_audio_stats_t au = {1, 4294967295u, 3, 12345, 40999, 4294967294u, NULL, 0, 0, 0, 0.0f, {0, 0, 0}};
+  const cmd_audio_stats_t au = {1, 4294967295u, 3, 12345, 40999, 4294967294u, NULL, 0, 0, 0, 0.0f, {0, 0, 0}, false, false, 0, 0};
   emit("info_audio", cmd_json_info("a", mac, "1.2.27", "array", false, 1, &au, NULL));
-  const cmd_audio_stats_t au0 = {-1, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0.0f, {0, 0, 0}};
+  const cmd_audio_stats_t au0 = {-1, 0, 0, 0, 0, 0, NULL, 0, 0, 0, 0.0f, {0, 0, 0}, false, false, 0, 0};
   emit("info_audio_idle", cmd_json_info("a", mac, "1.2.27", "flex", false, -1, &au0, NULL));
 
   /* reboot black box (1.2.29): a crash (no tag), a tagged deliberate
@@ -57,24 +57,29 @@ int main(void) {
    * http 0 -> null; hostile tag strings stay data and are cut to buffer */
   const cmd_link_stats_t lk = {201, 4294967295u};
   const cmd_ota_status_t ot = {"http-404", 404, 61};
-  const cmd_audio_stats_t au_i = {0, 50, 0, 9000, 25000, 0, "ok", 0, 0, 0, 0.0f, {0, 0, 0}};
+  const cmd_audio_stats_t au_i = {0, 50, 0, 9000, 25000, 0, "ok", 0, 0, 0, 0.0f, {0, 0, 0}, false, false, 0, 0};
   const cmd_boot_info_t b_lo = {"sw", "ota-success", 90, 70, -40, &ka, &lk, &ot};
   emit("info_link_ota", cmd_json_info("a", mac, "1.2.41", "array", false, 1, &au_i, &b_lo));
   const cmd_link_stats_t lk0 = {0, 0};
   const cmd_ota_status_t ot0 = {"none", 0, 0};
-  const cmd_audio_stats_t au_h = {0, 0, 0, 0, 0, 0, "i2s\",\"x\":1-0123456789abcdefghij", 0, 0, 0, 0.0f, {0, 0, 0}};
+  const cmd_audio_stats_t au_h = {0, 0, 0, 0, 0, 0, "i2s\",\"x\":1-0123456789abcdefghij", 0, 0, 0, 0.0f, {0, 0, 0}, false, false, 0, 0};
   const cmd_ota_status_t ot_h = {"bad\",\"y\":2-0123456789abcdefghij", 0, 1};
   const cmd_boot_info_t b_l0 = {"sw", "", 1, 1, -40, NULL, &lk0, &ot0};
   emit("info_link_none", cmd_json_info("a", mac, "1.2.41", "array", false, 1, NULL, &b_l0));
   const cmd_boot_info_t b_lh = {"sw", "", 1, 1, -40, NULL, NULL, &ot_h};
   emit("info_hostile_tags", cmd_json_info("a", mac, "1.2.41", "array", false, 1, &au_h, &b_lh));
   /* DSP profile evidence (1.2.42): rides in audio as "dsp" when the profile ran */
-  const cmd_audio_stats_t au_d = {0, 50, 0, 9000, 25000, 0, "ok", 7, 7, 7, 55.0f, {1, 0, 7}};
+  const cmd_audio_stats_t au_d = {0, 50, 0, 9000, 25000, 0, "ok", 7, 7, 7, 55.0f, {1, 0, 7}, false, false, 0, 0};
   emit("info_dsp", cmd_json_info("a", mac, "1.2.42", "flex", false, -1, &au_d, NULL));
-  const cmd_audio_stats_t au_df = {0, 50, 0, 9000, 25000, 0, "ok", 7, 5, 2, NAN, {0, 0, 0}};
+  const cmd_audio_stats_t au_df = {0, 50, 0, 9000, 25000, 0, "ok", 7, 5, 2, NAN, {0, 0, 0}, false, false, 0, 0};
   emit("info_dsp_fail", cmd_json_info("a", mac, "1.2.42", "flex", false, -1, &au_df, NULL));
-  const cmd_audio_stats_t au_dg = {0, 50, 0, 9000, 25000, 0, "ok", 7, 7, 6, 54.96f, {1, 0, 8}};
+  const cmd_audio_stats_t au_dg = {0, 50, 0, 9000, 25000, 0, "ok", 7, 7, 6, 54.96f, {1, 0, 8}, false, false, 0, 0};
   emit("info_dsp_round", cmd_json_info("a", mac, "1.2.42", "array", false, 1, &au_dg, NULL));
+  /* mute button diagnostics (1.2.45): array only, raw hex + rejected all-zero count */
+  const cmd_audio_stats_t au_b = {0, 50, 0, 9000, 25000, 0, "ok", 7, 7, 7, 55.0f, {1, 0, 8}, true, true, 0x0000ff01u, 4294967295u};
+  emit("info_btn", cmd_json_info("a", mac, "1.2.45", "array", true, -3, &au_b, NULL));
+  const cmd_audio_stats_t au_b0 = {0, 50, 0, 9000, 25000, 0, "ok", 7, 7, 7, 55.0f, {1, 0, 8}, true, false, 0, 3};
+  emit("info_btn_unseen", cmd_json_info("a", mac, "1.2.45", "array", true, -1, &au_b0, NULL));
 
   /* 3. scan: SSIDs straight off the air */
   static uint8_t ssids[8][33];
