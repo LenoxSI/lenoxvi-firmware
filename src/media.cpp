@@ -395,12 +395,11 @@ void pipecat_init_audio_capture() {
  * (only long holds were caught; live test 2026-10-16 18:50). Here a failed
  * read costs at most one 100 ms timeout, never sleep-retries. Busy/odd status = unknown, never a level.
  * Diag (get_info mute_hw.btn): 1/0 level, -1 bus error, -2 WAIT x5,
- * -3 all-zero reply (1.2.45), -100-N servicer status N.
- * All-zero replies: XVF_CTRL_DONE is 0x00, so a reply of nothing but zeros
- * reads as "done, button pressed" — two in a row made a phantom press, and
- * one between real reads broke a tap's debounce (live 2026-10-25: a press
- * 5 s after a real tap, taps lost, the bit "pressed" at idle after boot).
- * A real reply carries other GPI bits too, so all-zero = unknown. */
+ * -100-N servicer status N.
+ * NOT a bug to "fix": a real reply is only bit 0 (idle raw 0x00000001), so a
+ * genuine press IS the all-zero reply. 1.2.45 rejected all-zero replies as
+ * bogus and killed the button (measured live 2026-10-25). mute_hw.raw is
+ * the last reply, mute_hw.zero counts all-zero ("pressed") replies. */
 static int xvf_button_read_conversation(void);
 static int xvf_button_read_once(void) {
     if (xvf3800 == NULL) return -1;
@@ -424,7 +423,7 @@ static int xvf_button_read_conversation(void) {
         if (resp[0] == XVF_CTRL_DONE) {
             uint32_t raw = (uint32_t)resp[1] | ((uint32_t)resp[2] << 8)
                          | ((uint32_t)resp[3] << 16) | ((uint32_t)resp[4] << 24);
-            if (raw == 0) { s_btn_zero = s_btn_zero + 1; return -3; }
+            if (raw == 0) s_btn_zero = s_btn_zero + 1;   /* counted, still a level */
             s_btn_raw = raw;
             s_btn_raw_seen = true;
             return (resp[1] >> XVF_GPI_BUTTON_BIT) & 1;

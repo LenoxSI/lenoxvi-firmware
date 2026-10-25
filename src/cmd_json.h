@@ -49,9 +49,9 @@ typedef struct cmd_audio_stats_t {
   float dsp_mic_gain;
   uint8_t dsp_ver[3];
   /* Array mute button diagnostics (1.2.45), emitted into "mute_hw" when
-   * btn_diag: the last real GPI reply (raw, hex; null until one arrived) and
-   * how many all-zero replies were rejected (zero). An all-zero reply reads
-   * as "status done, button pressed" and caused phantom presses. */
+   * btn_diag: the last GPI reply (raw, hex; null until one arrived) and how
+   * many all-zero replies arrived (zero). A real reply is only bit 0, so
+   * all-zero is the button held down. */
   bool btn_diag;
   bool btn_raw_seen;
   uint32_t btn_raw;
