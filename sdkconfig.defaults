@@ -75,3 +75,17 @@ CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
 # ONE USB flash of the new bootloader before rollback is live. Anti-rollback
 # (security versions) stays off.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Signed updates (1.3.0, note 071): an OTA image is installed only if it
+# carries a Secure Boot V2 signature (RSA-3072; the only scheme the S3 has in
+# IDF 5.3) made with the same key as the image this node is running. The bot
+# holds the key and signs everything it serves; builds never see a key, so
+# BUILD_SIGNED_BINARIES stays off. No hardware secure boot, no eFuses, no
+# bootloader change: esp_ota_end() verifies, before the boot partition switches.
+# An image built with this and flashed UNSIGNED (plain idf.py flash) trusts no
+# key and refuses every update — first flashes go through the dashboard's Node
+# setup page, which flashes the bot-signed image.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+# CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES is not set

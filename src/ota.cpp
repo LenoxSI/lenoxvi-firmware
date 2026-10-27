@@ -447,8 +447,12 @@ static esp_err_t download_and_flash_ota_impl(const char *firmware_url, const cha
 
     err = esp_ota_end(update_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(OTA_TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
-        ota_record("flash-failed", status);
+        /* 1.3.0: VALIDATE_FAILED covers "not signed by the key this image was
+         * signed with" (signed updates) as well as a corrupt image. Either way
+         * the slot never becomes bootable; the node keeps running. */
+        ESP_LOGE(OTA_TAG, "esp_ota_end failed: %s%s", esp_err_to_name(err),
+                 err == ESP_ERR_OTA_VALIDATE_FAILED ? " (image refused: bad or missing signature, or corrupt)" : "");
+        ota_record(err == ESP_ERR_OTA_VALIDATE_FAILED ? "image-refused" : "flash-failed", status);
         return err;
     }
 

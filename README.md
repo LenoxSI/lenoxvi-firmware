@@ -80,10 +80,12 @@ refuses to publish an image built with either.
 
 ## Flashing
 
-- **First flash of a blank board:** USB, with `WIFI_SSID`/`WIFI_PASSWORD` set
-  for that one build (the firmware has no setup hotspot):
-  `idf.py -p <port> flash`. Then set Wi-Fi and the node name from the LenoxVI
-  dashboard; every later image can be credential-free.
+- **First flash of a blank board:** build, publish the image to the bot
+  (`scripts/deploy_firmware.sh` or the dashboard's Firmware panel), then flash it
+  over USB from the dashboard's **Node setup** page — that flashes the
+  bot-signed image (see *Signed updates*). A plain `idf.py -p <port> flash`
+  still boots, but the node will refuse every over-the-air update until it's
+  re-flashed from Node setup.
 - **Updates:** over the air through the LenoxVI bot — the dashboard's Firmware
   panel, or `scripts/deploy_firmware.sh --track array|flex|waveshare` in the
   LenoxVI repo.
@@ -91,6 +93,22 @@ refuses to publish an image built with either.
   it reaches the bot within 5 minutes.
 - On array/flex, the XVF3800 audio chip runs its own XMOS firmware, flashed
   separately (see the LenoxVI repo's bring-up docs).
+
+## Signed updates
+
+From 1.3.0 a node installs an over-the-air update only if it's signed with the
+same key as the firmware it's running (ESP-IDF "verify app signature on
+update", RSA-3072, no hardware secure boot or eFuses). **The LenoxVI bot
+holds the key and signs every image it serves** — you build images exactly as
+before, unsigned, and never handle a key. A refused image never becomes
+bootable; the node keeps running and reports `image-refused` in its OTA status.
+
+- Nodes on 1.2.x don't check signatures, so they accept the first signed image.
+- Keep a backup of the bot's key (LenoxVI README, *Security*). A bot with a
+  different key can't update your nodes until each one is re-flashed over USB
+  from the dashboard's Node setup page.
+- Hardware secure boot and flash encryption are not used: a node someone can
+  plug into is not protected by this.
 
 ## Versions
 
