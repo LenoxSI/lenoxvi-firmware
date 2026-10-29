@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/lenoxvi-horizontal-lime-on-dark.svg">
+  <img alt="LenoxVI" src="docs/lenoxvi-horizontal-lime-on-light.svg" width="420">
+</picture>
+
 # lenoxvi-firmware — LenoxVI mic-node firmware
 
 Firmware for the ESP32-S3 microphone nodes of [LenoxVI](https://github.com/LenoxSI/lenoxvi).
