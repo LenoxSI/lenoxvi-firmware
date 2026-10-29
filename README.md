@@ -3,7 +3,7 @@
   <img alt="LenoxVI" src="docs/lenoxvi-horizontal-lime-on-light.svg" width="420">
 </picture>
 
-# lenoxvi-firmware — LenoxVI mic-node firmware
+# Mic-node firmware
 
 Firmware for the ESP32-S3 microphone nodes of [LenoxVI](https://github.com/LenoxSI/lenoxvi).
 A node streams its microphone to the LenoxVI bot over WebRTC (data channel for
