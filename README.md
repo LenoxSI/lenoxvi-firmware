@@ -124,6 +124,8 @@ a node only updates when its own line's track serves a newer image.
 
 ## Third-party code
 
+- The firmware started from the [Pipecat ESP32 Client SDK](https://github.com/pipecat-ai/pipecat-esp32)
+  (MIT, Daily and OpenAI); its notice is in `NOTICE`.
 - `components/srtp` — [libsrtp](https://github.com/cisco/libsrtp), BSD-3-Clause
   (`components/srtp/libsrtp/LICENSE`), with an ESP-IDF port, MIT
   (`components/srtp/LICENSE`). Vendored.
@@ -136,3 +138,7 @@ a node only updates when its own line's track serves a newer image.
   Apache-2.0): `espressif/esp_codec_dev` (ES7210 driver),
   `espressif/esp_io_expander` + `esp_io_expander_tca95xx_16bit` (TCA9555),
   `espressif/led_strip` (WS2812 ring).
+
+## License
+
+Apache License 2.0 — see `LICENSE` and `NOTICE`.
